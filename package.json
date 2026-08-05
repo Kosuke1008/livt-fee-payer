@@ -1,0 +1,23 @@
+{
+  "name": "livt-fee-payer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.13.1",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prestart": "corepack pnpm build",
+    "setup:kairos": "corepack pnpm build && node dist/src/setup-kairos.js",
+    "start": "node --env-file-if-exists=.env dist/src/server.js",
+    "test": "corepack pnpm build && node --test dist/tests/*.test.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@kaiachain/viem-ext": "2.1.0",
+    "viem": "2.55.10"
+  },
+  "devDependencies": {
+    "@types/node": "24.3.0",
+    "typescript": "5.9.3"
+  }
+}
