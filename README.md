@@ -1,42 +1,87 @@
 # LivT Fee Payer
 
-KairosでLivTのJPYC決済手数料を負担する、ローカル専用のFee Payer
-sidecarです。Kaia管理Fee Delegation ServiceやUnifi APIは使用しません。
+LivTのJPYC決済手数料を負担する、セルフホスト型のFee Payerサービスです。
+
+LivT Walletがブラウザ内で署名したtransactionへFee Payer署名を追加し、Kaia
+Kairosへbroadcastします。Kaia管理Fee Delegation ServiceやUnifi APIは使用しません。
+
+> 現在はKairos実証専用です。Mainnetでは使用できません。
+
+## 処理フロー
+
+```text
+LivT Wallet
+  └─ sender署名（Wallet秘密情報は端末外へ出さない）
+       ↓
+LivT Laravel
+  └─ 決済内容とsender署名を検証
+       ↓ 127.0.0.1 + 内部Bearer
+LivT Fee Payer
+  ├─ transaction policyを再検証
+  ├─ 専用Fee Payer鍵で追加署名
+  ├─ Kairosへ1回だけbroadcast
+  └─ receiptを確認
+       ↓ transaction hash
+LivT Laravel
+  └─ 既存の共通verifierでreceiptとJPYC Transferを再検証して決済確定
+```
 
 ## セキュリティ境界
 
-- `127.0.0.1`だけで待ち受けます。
-- LivT Walletの秘密鍵、mnemonic、Walletパスワードは受け取りません。
-- 専用Fee Payer秘密鍵はこのserviceの`.env`だけに置きます。
-- sender署名済みRLPと完全RLPをログへ出しません。
-- broadcastは自動retryしません。receipt確認のpollingだけを行います。
-- Kairos、`0x31`、JPYC、ERC-20 `transfer`、value 0、gas上限を固定検証します。
+- `127.0.0.1`だけで待ち受け、外部公開しません。
+- Walletのmnemonic、秘密鍵、パスワード、復号済み情報を受け取りません。
+- 専用Fee Payer秘密鍵はこのサービスの`.env`だけに保存します。
+- sender署名済みRLPとFee Payer署名済みRLPをログへ出しません。
+- Kairos、transaction type `0x31`、JPYC contract、ERC-20 `transfer`、value 0、
+  gas上限、署名前後のfieldを検証します。
+- broadcastは自動retryしません。新しいtransactionを作らないreceipt pollingだけを
+  行います。
 
-## Kairos実証準備
+## セットアップ
 
-1. 依存関係をインストールします。
-2. 次の初期化コマンドで新しいKairos専用EOAを作成します。秘密鍵はmode `0600`の`.env`だけへ保存され、terminalには公開アドレスだけを表示します。
-3. 表示された公開アドレスへKairos Faucetから必要最小限のKAIAを入れます。
-4. テストを実行します。
+Node.jsとCorepackを用意し、Kairos専用Fee Payer EOAを作成します。
 
 ```bash
 corepack pnpm install
 corepack pnpm setup:kairos
+```
+
+`setup:kairos`は次の動作だけを行います。
+
+- 新しいKairos専用EOAを生成
+- 秘密鍵をmode `0600`の`.env`へ保存
+- terminalには公開アドレスだけを表示
+- 既存の`.env`がある場合は上書きせず終了
+
+表示された公開アドレスへKairos Faucetから必要最小限のKAIAを入れてください。
+既存ユーザーWallet、Mainnet鍵、LivT Walletのmnemonicは流用しないでください。
+
+## テスト
+
+```bash
 corepack pnpm test
 corepack pnpm typecheck
 ```
 
-`setup:kairos`は既存の`.env`を上書きしません。既存ユーザーWallet、Mainnet鍵、
-LivT WalletのmnemonicをFee Payerとして流用しないでください。
+テストはHTTP fakeとoffline署名を使用し、実Kairosへbroadcastしません。
 
-通常はLivT Walletのlive runnerが一時的な内部APIキーを生成し、このsidecar、
-Laravel、Walletをまとめて起動します。内部APIキーやFee Payer秘密鍵をブラウザへ
-渡すことはありません。
+## Kairos手動レビュー
+
+LivT Walletのreview runnerがLaravel、Wallet、Fee Payerをまとめて起動します。
+runnerは起動ごとに内部Bearerを生成するため、外部API keyの取得や`.env`への記載は
+不要です。
 
 ```bash
-cd /home/kosuke/projects/livt-wallet
+cd ../livt-wallet
 corepack pnpm review:kairos-fee-delegated-live
 ```
 
-この実装はKairos実証限定です。MainnetではFee Payer署名をKMS/HSMへ移し、
-永続的な冪等性、利用上限、監査、残高監視を追加するまで有効化しません。
+## Mainnetについて
+
+Mainnetでは、少なくとも次の対応が完了するまで有効化しません。
+
+- Fee Payer秘密鍵をKMS/HSMへ移行
+- 永続的な冪等性と結果不明transactionの復旧
+- 利用上限、rate limit、監査ログ、残高監視、緊急停止
+- Mainnet用chain・contract・RPC・鍵の完全分離
+- transaction policyと鍵運用の独立セキュリティレビュー
