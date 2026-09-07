@@ -16,6 +16,7 @@ test('requires bearer authentication and returns the FDS-compatible success shap
   let calls = 0
   const server = createFeePayerServer({
     apiKey: API_KEY,
+    networkId: 'kairos',
     feePayerAddress: SENDER,
     sponsorService: {
       sponsor: async (raw) => {
@@ -64,6 +65,7 @@ test('maps policy and unknown failures without leaking internal messages', async
   let index = 0
   const server = createFeePayerServer({
     apiKey: API_KEY,
+    networkId: 'kairos',
     feePayerAddress: SENDER,
     sponsorService: {
       sponsor: async () => {
@@ -102,6 +104,7 @@ test('logs only fixed diagnostic codes for malformed, reverted, and unexpected f
   let index = 0
   const server = createFeePayerServer({
     apiKey: API_KEY,
+    networkId: 'kairos',
     feePayerAddress: SENDER,
     sponsorService: {
       sponsor: async () => {

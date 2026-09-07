@@ -1,7 +1,6 @@
 import { createHash } from 'node:crypto'
 import {
   createWalletClient,
-  kairos,
   privateKeyToAccount,
 } from '@kaiachain/viem-ext'
 import {
@@ -16,6 +15,7 @@ import {
   type Hex,
 } from 'viem'
 import type { FeePayerConfig } from './config.js'
+import { assertFeePayerExecutionAllowed } from './network-profiles.js'
 import {
   TransactionPolicyError,
   validateFeePayerTransaction,
@@ -65,7 +65,7 @@ export class SponsorService {
   constructor(
     private readonly config: Pick<
       FeePayerConfig,
-      'tokenContract' | 'maxGas'
+      'tokenContract' | 'maxGas' | 'chainId'
     >,
     private readonly dependencies: SponsorDependencies,
   ) {}
@@ -75,6 +75,7 @@ export class SponsorService {
       raw,
       this.config.tokenContract,
       this.config.maxGas,
+      this.config.chainId,
     )
     const fingerprint = createHash('sha256').update(sender.raw).digest('hex')
     const existing = this.attempts.get(fingerprint)
@@ -112,6 +113,7 @@ export class SponsorService {
       fullRaw,
       sender,
       this.dependencies.feePayerAddress,
+      this.config.chainId,
     )
 
     let recovered: Address
@@ -168,14 +170,19 @@ export class SponsorService {
 export function createSponsorDependencies(
   config: FeePayerConfig,
 ): SponsorDependencies {
+  assertFeePayerExecutionAllowed(config.profile)
+  if (config.privateKey === null) {
+    throw new Error('Fee-payer signing key is unavailable')
+  }
+
   const account = privateKeyToAccount(config.privateKey)
   const wallet = createWalletClient({
     account,
-    chain: kairos,
+    chain: config.profile.chain,
     transport: http(config.rpcUrl, { retryCount: 0, timeout: 10_000 }),
   })
   const publicClient = createPublicClient({
-    chain: kairos,
+    chain: config.profile.chain,
     transport: http(config.rpcUrl, { retryCount: 0, timeout: 10_000 }),
   })
 
@@ -210,22 +217,6 @@ export function createSponsorDependencies(
         status: receipt.status,
       }
     },
-  }
-}
-
-export async function assertKairosReady(
-  config: FeePayerConfig,
-): Promise<void> {
-  const publicClient = createPublicClient({
-    chain: kairos,
-    transport: http(config.rpcUrl, { retryCount: 0, timeout: 10_000 }),
-  })
-  const [chainId, bytecode] = await Promise.all([
-    publicClient.getChainId(),
-    publicClient.getBytecode({ address: config.tokenContract }),
-  ])
-  if (chainId !== 1001 || bytecode === undefined) {
-    throw new Error('Kairos fee payer is not ready')
   }
 }
 

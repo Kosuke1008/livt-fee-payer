@@ -59,7 +59,7 @@ async function dependencies(options: {
 test('signs, recovers, broadcasts once, and reuses a successful result', async () => {
   const fixture = await dependencies()
   const service = new SponsorService(
-    { tokenContract: TOKEN, maxGas: 150000n },
+    { tokenContract: TOKEN, maxGas: 150000n, chainId: 1001 },
     fixture.value,
   )
 
@@ -79,7 +79,7 @@ test('signs, recovers, broadcasts once, and reuses a successful result', async (
 test('never broadcasts when recovered sender does not match', async () => {
   const fixture = await dependencies({ recovered: OTHER_ADDRESS })
   const service = new SponsorService(
-    { tokenContract: TOKEN, maxGas: 150000n },
+    { tokenContract: TOKEN, maxGas: 150000n, chainId: 1001 },
     fixture.value,
   )
 
@@ -90,7 +90,7 @@ test('never broadcasts when recovered sender does not match', async () => {
 test('does not automatically retry an ambiguous broadcast', async () => {
   const fixture = await dependencies({ broadcastFailure: true })
   const service = new SponsorService(
-    { tokenContract: TOKEN, maxGas: 150000n },
+    { tokenContract: TOKEN, maxGas: 150000n, chainId: 1001 },
     fixture.value,
   )
 
@@ -109,7 +109,7 @@ test('does not automatically retry an ambiguous broadcast', async () => {
 test('a confirmed revert can be attempted again', async () => {
   const fixture = await dependencies({ receiptStatus: 'reverted' })
   const service = new SponsorService(
-    { tokenContract: TOKEN, maxGas: 150000n },
+    { tokenContract: TOKEN, maxGas: 150000n, chainId: 1001 },
     fixture.value,
   )
 

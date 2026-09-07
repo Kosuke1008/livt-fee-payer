@@ -1,6 +1,7 @@
 import { timingSafeEqual } from 'node:crypto'
 import { createServer, type IncomingMessage, type Server } from 'node:http'
 import type { Address } from 'viem'
+import type { NetworkId } from './network-profiles.js'
 import {
   SponsorshipStatusUnknownError,
   type SponsorService,
@@ -26,6 +27,7 @@ export type FeePayerDiagnosticCode =
 
 export function createFeePayerServer(options: {
   readonly apiKey: string
+  readonly networkId: NetworkId
   readonly feePayerAddress: Address
   readonly sponsorService: Pick<SponsorService, 'sponsor'>
   readonly logDiagnostic?: (code: FeePayerDiagnosticCode) => void
@@ -41,7 +43,7 @@ export function createFeePayerServer(options: {
       response.end(
         JSON.stringify({
           status: 'ok',
-          network: 'kairos',
+          network: options.networkId,
           fee_payer_address: options.feePayerAddress,
         }),
       )

@@ -1,19 +1,31 @@
 import { loadConfig } from './config.js'
 import { createFeePayerServer } from './http.js'
 import {
-  assertKairosReady,
   createSponsorDependencies,
   SponsorService,
 } from './sponsor.js'
+import { assertFeePayerExecutionAllowed } from './network-profiles.js'
+import {
+  assertNetworkReady,
+  shouldUseDevelopmentReadinessBypass,
+} from './readiness.js'
 
 async function main(): Promise<void> {
   const config = loadConfig()
+  assertFeePayerExecutionAllowed(config.profile)
   const dependencies = createSponsorDependencies(config)
-  await assertKairosReady(config)
+  if (shouldUseDevelopmentReadinessBypass(config.profile, process.env)) {
+    process.stdout.write(
+      'Skipping Kairos readiness check (explicit development bypass)\n',
+    )
+  } else {
+    await assertNetworkReady(config)
+  }
 
   const sponsorService = new SponsorService(config, dependencies)
   const server = createFeePayerServer({
     apiKey: config.apiKey,
+    networkId: config.networkId,
     feePayerAddress: dependencies.feePayerAddress,
     sponsorService,
   })
@@ -26,7 +38,7 @@ async function main(): Promise<void> {
 
   server.listen(config.port, config.host, () => {
     process.stdout.write(
-      `LivT Fee Payer ready on ${config.host}:${config.port} (Kairos)\n`,
+      `LivT Fee Payer ready on ${config.host}:${config.port} (${config.networkId})\n`,
     )
   })
 }

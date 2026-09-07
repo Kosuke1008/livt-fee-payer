@@ -55,6 +55,7 @@ export function validateSenderTransaction(
   raw: unknown,
   tokenContract: Address,
   maxGas: bigint,
+  expectedChainId: number,
 ): ValidatedSenderTransaction {
   if (
     typeof raw !== 'string' ||
@@ -106,7 +107,7 @@ export function validateSenderTransaction(
   if (!Array.isArray(signatures) || signatures.length !== 1) {
     throw new TransactionPolicyError('INVALID_SENDER_SIGNATURE')
   }
-  if (getChainId(signatures) !== 1001) {
+  if (getChainId(signatures) !== expectedChainId) {
     throw new TransactionPolicyError('WRONG_CHAIN')
   }
 
@@ -133,6 +134,7 @@ export function validateFeePayerTransaction(
   fullRaw: unknown,
   sender: ValidatedSenderTransaction,
   feePayer: Address,
+  expectedChainId: number,
 ): Hex {
   if (typeof fullRaw !== 'string' || !isHex(fullRaw)) {
     throw new TransactionPolicyError('INVALID_FEE_PAYER_TRANSACTION')
@@ -173,7 +175,7 @@ export function validateFeePayerTransaction(
   ) {
     throw new TransactionPolicyError('INVALID_FEE_PAYER_SIGNATURE')
   }
-  if (getChainId(full.feePayerSignatures) !== 1001) {
+  if (getChainId(full.feePayerSignatures) !== expectedChainId) {
     throw new TransactionPolicyError('WRONG_CHAIN')
   }
 

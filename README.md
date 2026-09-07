@@ -7,6 +7,11 @@ Kairosへbroadcastします。Kaia管理Fee Delegation ServiceやUnifi APIは使
 
 > 現在はKairos実証専用です。Mainnetでは使用できません。
 
+ネットワークはapplication環境から推測せず、`BLOCKCHAIN_NETWORK=kairos`で
+明示します。`kaia-mainnet` profileもchain ID 8217、JPYC、explorer、RPCの
+検証用metadataとして存在しますが、Phase 1ではサーバ起動・署名・broadcastを
+常に拒否します。`FEE_PAYER_MAINNET_ENABLED=true`だけで有効にはなりません。
+
 ## 処理フロー
 
 ```text
@@ -36,6 +41,9 @@ LivT Laravel
   gas上限、署名前後のfieldを検証します。
 - broadcastは自動retryしません。新しいtransactionを作らないreceipt pollingだけを
   行います。
+- `FEE_PAYER_SKIP_KAIROS_CHECK=1`は、非productionのKairosで
+  `FEE_PAYER_DEVELOPMENT_BYPASS_ENABLED=1`も指定した場合だけ利用できます。
+  Mainnetでは必ず拒否します。
 
 ## セットアップ
 
@@ -52,6 +60,13 @@ corepack pnpm setup:kairos
 - 秘密鍵をmode `0600`の`.env`へ保存
 - terminalには公開アドレスだけを表示
 - 既存の`.env`がある場合は上書きせず終了
+
+既存の`.env`を継続利用する場合は、次を明示的に追加してください。旧
+`FEE_PAYER_PRIVATE_KEY`と`KAIROS_RPC_URL`は移行期間中も利用できます。
+
+```dotenv
+BLOCKCHAIN_NETWORK=kairos
+```
 
 表示された公開アドレスへKairos Faucetから必要最小限のKAIAを入れてください。
 既存ユーザーWallet、Mainnet鍵、LivT Walletのmnemonicは流用しないでください。

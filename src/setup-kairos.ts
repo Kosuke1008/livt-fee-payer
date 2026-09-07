@@ -11,9 +11,12 @@ async function main(): Promise<void> {
   let file
   try {
     file = await open(path, 'wx', 0o600)
-    await file.writeFile(`FEE_PAYER_PRIVATE_KEY=${privateKey}\n`, {
-      encoding: 'utf8',
-    })
+    await file.writeFile(
+      `BLOCKCHAIN_NETWORK=kairos\nFEE_PAYER_KAIROS_PRIVATE_KEY=${privateKey}\n`,
+      {
+        encoding: 'utf8',
+      },
+    )
   } catch (error) {
     if (isAlreadyExists(error)) {
       throw new Error('Fee Payer .env already exists; it was not changed')
