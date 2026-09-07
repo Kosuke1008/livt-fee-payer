@@ -12,6 +12,9 @@ import {
 
 async function main(): Promise<void> {
   const config = loadConfig()
+  if (config.killSwitchActive) {
+    throw new Error('Fee-payer kill switch is active')
+  }
   assertFeePayerExecutionAllowed(config.profile)
   const dependencies = createSponsorDependencies(config)
   if (shouldUseDevelopmentReadinessBypass(config.profile, process.env)) {

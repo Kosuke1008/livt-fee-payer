@@ -3,14 +3,15 @@
 LivTのJPYC決済手数料を負担する、セルフホスト型のFee Payerサービスです。
 
 LivT Walletがブラウザ内で署名したtransactionへFee Payer署名を追加し、Kaia
-Kairosへbroadcastします。Kaia管理Fee Delegation ServiceやUnifi APIは使用しません。
+Kairosへbroadcastします。Kaia Managed Fee DelegationはLaravel側の将来選択肢として
+残しますが、このserviceから自動fallbackしません。
 
 > 現在はKairos実証専用です。Mainnetでは使用できません。
 
 ネットワークはapplication環境から推測せず、`BLOCKCHAIN_NETWORK=kairos`で
 明示します。`kaia-mainnet` profileもchain ID 8217、JPYC、explorer、RPCの
-検証用metadataとして存在しますが、Phase 1ではサーバ起動・署名・broadcastを
-常に拒否します。`FEE_PAYER_MAINNET_ENABLED=true`だけで有効にはなりません。
+検証用metadataとして存在しますが、Phase 8でもサーバ起動・署名・broadcastを
+常に拒否します。Mainnet profileのexecution/signing/broadcast policyはcode上でfalseです。
 
 ## 処理フロー
 
@@ -35,12 +36,16 @@ LivT Laravel
 
 - `127.0.0.1`だけで待ち受け、外部公開しません。
 - Walletのmnemonic、秘密鍵、パスワード、復号済み情報を受け取りません。
-- 専用Fee Payer秘密鍵はこのサービスの`.env`だけに保存します。
+- Kairos local signerだけがprocess秘密鍵を利用します。Mainnetはexternal signer addressの
+  構造確認のみで、KMS/HSM adapterやprocess local keyは実装していません。
 - sender署名済みRLPとFee Payer署名済みRLPをログへ出しません。
 - Kairos、transaction type `0x31`、JPYC contract、ERC-20 `transfer`、value 0、
   gas上限、署名前後のfieldを検証します。
 - broadcastは自動retryしません。新しいtransactionを作らないreceipt pollingだけを
   行います。
+- kill switchと最低KAIA reserveは署名前に検査します。
+- Mainnet primary RPCは専用providerを要求し、secondary RPCはread-onlyです。broadcast
+  failoverには使いません。
 - `FEE_PAYER_SKIP_KAIROS_CHECK=1`は、非productionのKairosで
   `FEE_PAYER_DEVELOPMENT_BYPASS_ENABLED=1`も指定した場合だけ利用できます。
   Mainnetでは必ず拒否します。
@@ -76,9 +81,11 @@ BLOCKCHAIN_NETWORK=kairos
 ```bash
 corepack pnpm test
 corepack pnpm typecheck
+corepack pnpm build
 ```
 
 テストはHTTP fakeとoffline署名を使用し、実Kairosへbroadcastしません。
+production buildの`dist/src`にはtestsと`setup-kairos`を含めません。
 
 ## Kairos手動レビュー
 
@@ -93,9 +100,27 @@ corepack pnpm review:kairos-fee-delegated-live
 
 ## Mainnetについて
 
+Phase 8のread-only構造確認コマンドは次です。Mainnet keyを読み込まず、署名・broadcastを
+行わず、すべてのMainnet execution gateがfalseでkill switchがactiveの場合だけ成功します。
+
+```bash
+corepack pnpm readiness:mainnet
+```
+
+Phase 9 stagingでは、同じread-only検査に合格した場合だけlocalhost health processを起動できます。
+このentry pointにはsigning routeがなく、external signerは`UNAVAILABLE`、kill switchは`ACTIVE`、
+execution/signing/broadcastは`DISABLED`として報告されます。
+
+```bash
+corepack pnpm start:mainnet-staging-health
+```
+
+`FeePayerSigner`は`senderRaw`を受けて`signedRaw`を返し、addressとhealthを提供する契約です。
+Kairos local signerだけが署名可能で、Mainnet external signerはPhase 9では常にunavailableです。
+
 Mainnetでは、少なくとも次の対応が完了するまで有効化しません。
 
-- Fee Payer秘密鍵をKMS/HSMへ移行
+- external signerをKMS/HSMへ接続し、独立security reviewを完了
 - 永続的な冪等性と結果不明transactionの復旧
 - 利用上限、rate limit、監査ログ、残高監視、緊急停止
 - Mainnet用chain・contract・RPC・鍵の完全分離

@@ -17,16 +17,21 @@ import {
 
 async function dependencies(options: {
   readonly recovered?: Address
-  readonly broadcastFailure?: boolean
+  readonly broadcastFailure?: Error
   readonly receiptStatus?: 'success' | 'reverted'
+  readonly balance?: bigint
+  readonly balanceFailure?: boolean
 } = {}): Promise<{
   readonly value: SponsorDependencies
-  readonly calls: Record<'sign' | 'recover' | 'broadcast' | 'receipt', number>
+  readonly calls: Record<
+    'balance' | 'sign' | 'recover' | 'broadcast' | 'receipt',
+    number
+  >
   readonly expectedHash: Hash
 }> {
   const fixture = await feePayerFixture()
   const expectedHash = keccak256(fixture.fullRaw)
-  const calls = { sign: 0, recover: 0, broadcast: 0, receipt: 0 }
+  const calls = { balance: 0, sign: 0, recover: 0, broadcast: 0, receipt: 0 }
   return {
     calls,
     expectedHash,
@@ -42,7 +47,9 @@ async function dependencies(options: {
       },
       broadcast: async () => {
         calls.broadcast++
-        if (options.broadcastFailure === true) throw new Error('private RPC')
+        if (options.broadcastFailure !== undefined) {
+          throw options.broadcastFailure
+        }
         return expectedHash
       },
       waitForReceipt: async () => {
@@ -52,6 +59,11 @@ async function dependencies(options: {
           status: options.receiptStatus ?? 'success',
         }
       },
+      getFeePayerBalance: async () => {
+        calls.balance++
+        if (options.balanceFailure === true) throw new Error('private RPC')
+        return options.balance ?? 10n ** 18n
+      },
     },
   }
 }
@@ -59,7 +71,13 @@ async function dependencies(options: {
 test('signs, recovers, broadcasts once, and reuses a successful result', async () => {
   const fixture = await dependencies()
   const service = new SponsorService(
-    { tokenContract: TOKEN, maxGas: 150000n, chainId: 1001 },
+    {
+      tokenContract: TOKEN,
+      maxGas: 150000n,
+      chainId: 1001,
+      killSwitchActive: false,
+      minimumReserveWei: 0n,
+    },
     fixture.value,
   )
 
@@ -69,6 +87,7 @@ test('signs, recovers, broadcasts once, and reuses a successful result', async (
   assert.deepEqual(first, { hash: fixture.expectedHash, status: 'success' })
   assert.deepEqual(second, first)
   assert.deepEqual(fixture.calls, {
+    balance: 1,
     sign: 1,
     recover: 1,
     broadcast: 1,
@@ -79,7 +98,13 @@ test('signs, recovers, broadcasts once, and reuses a successful result', async (
 test('never broadcasts when recovered sender does not match', async () => {
   const fixture = await dependencies({ recovered: OTHER_ADDRESS })
   const service = new SponsorService(
-    { tokenContract: TOKEN, maxGas: 150000n, chainId: 1001 },
+    {
+      tokenContract: TOKEN,
+      maxGas: 150000n,
+      chainId: 1001,
+      killSwitchActive: false,
+      minimumReserveWei: 0n,
+    },
     fixture.value,
   )
 
@@ -87,33 +112,92 @@ test('never broadcasts when recovered sender does not match', async () => {
   assert.equal(fixture.calls.broadcast, 0)
 })
 
-test('does not automatically retry an ambiguous broadcast', async () => {
-  const fixture = await dependencies({ broadcastFailure: true })
-  const service = new SponsorService(
-    { tokenContract: TOKEN, maxGas: 150000n, chainId: 1001 },
-    fixture.value,
-  )
+for (const [caseName, failure] of [
+  ['timeout', new Error('request timed out')],
+  ['connection reset', new Error('connection reset')],
+  ['ambiguous RPC response', new Error('private RPC ambiguity')],
+] as const) {
+  test(`does not automatically retry a broadcast ${caseName}`, async () => {
+    const fixture = await dependencies({ broadcastFailure: failure })
+    const service = new SponsorService(
+      {
+        tokenContract: TOKEN,
+        maxGas: 150000n,
+        chainId: 1001,
+        killSwitchActive: false,
+        minimumReserveWei: 0n,
+      },
+      fixture.value,
+    )
 
-  await assert.rejects(() => service.sponsor(SENDER_RAW), (error: unknown) => {
-    assert.ok(error instanceof SponsorshipStatusUnknownError)
-    assert.equal(error.stage, 'broadcast')
-    return true
+    await assert.rejects(() => service.sponsor(SENDER_RAW), (error: unknown) => {
+      assert.ok(error instanceof SponsorshipStatusUnknownError)
+      assert.equal(error.stage, 'broadcast')
+      return true
+    })
+    await assert.rejects(
+      () => service.sponsor(SENDER_RAW),
+      SponsorshipStatusUnknownError,
+    )
+    assert.equal(fixture.calls.broadcast, 1)
   })
-  await assert.rejects(
-    () => service.sponsor(SENDER_RAW),
-    SponsorshipStatusUnknownError,
-  )
-  assert.equal(fixture.calls.broadcast, 1)
+}
+
+test('kill switch and insufficient reserve block signing and broadcast', async () => {
+  for (const [killSwitchActive, balance] of [
+    [true, 10n ** 18n],
+    [false, 1n],
+  ] as const) {
+    const fixture = await dependencies({ balance })
+    const service = new SponsorService(
+      {
+        tokenContract: TOKEN,
+        maxGas: 150000n,
+        chainId: 1001,
+        killSwitchActive,
+        minimumReserveWei: 10n,
+      },
+      fixture.value,
+    )
+
+    await assert.rejects(() => service.sponsor(SENDER_RAW))
+    assert.equal(fixture.calls.sign, 0)
+    assert.equal(fixture.calls.broadcast, 0)
+  }
 })
 
-test('a confirmed revert can be attempted again', async () => {
+test('balance RPC failure fails safely before signing', async () => {
+  const fixture = await dependencies({ balanceFailure: true })
+  const service = new SponsorService(
+    {
+      tokenContract: TOKEN,
+      maxGas: 150000n,
+      chainId: 1001,
+      killSwitchActive: false,
+      minimumReserveWei: 10n,
+    },
+    fixture.value,
+  )
+
+  await assert.rejects(() => service.sponsor(SENDER_RAW))
+  assert.equal(fixture.calls.sign, 0)
+  assert.equal(fixture.calls.broadcast, 0)
+})
+
+test('a confirmed revert is retained and cannot be broadcast again', async () => {
   const fixture = await dependencies({ receiptStatus: 'reverted' })
   const service = new SponsorService(
-    { tokenContract: TOKEN, maxGas: 150000n, chainId: 1001 },
+    {
+      tokenContract: TOKEN,
+      maxGas: 150000n,
+      chainId: 1001,
+      killSwitchActive: false,
+      minimumReserveWei: 0n,
+    },
     fixture.value,
   )
 
   assert.equal((await service.sponsor(SENDER_RAW)).status, 'reverted')
   assert.equal((await service.sponsor(SENDER_RAW)).status, 'reverted')
-  assert.equal(fixture.calls.broadcast, 2)
+  assert.equal(fixture.calls.broadcast, 1)
 })

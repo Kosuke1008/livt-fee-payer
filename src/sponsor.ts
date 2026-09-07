@@ -1,9 +1,5 @@
 import { createHash } from 'node:crypto'
 import {
-  createWalletClient,
-  privateKeyToAccount,
-} from '@kaiachain/viem-ext'
-import {
   createPublicClient,
   getAddress,
   http,
@@ -15,7 +11,11 @@ import {
   type Hex,
 } from 'viem'
 import type { FeePayerConfig } from './config.js'
-import { assertFeePayerExecutionAllowed } from './network-profiles.js'
+import {
+  assertFeePayerExecutionAllowed,
+  NetworkExecutionDisabledError,
+} from './network-profiles.js'
+import { createFeePayerSigner, type FeePayerSigner } from './signer.js'
 import {
   TransactionPolicyError,
   validateFeePayerTransaction,
@@ -33,6 +33,7 @@ export interface SponsorDependencies {
   readonly recoverSender: (fullRaw: Hex) => Promise<Address>
   readonly broadcast: (fullRaw: Hex) => Promise<Hash>
   readonly waitForReceipt: (hash: Hash) => Promise<SponsorshipReceipt>
+  readonly getFeePayerBalance: () => Promise<bigint>
 }
 
 export interface SponsorshipResult {
@@ -59,18 +60,40 @@ export class SponsorshipStatusUnknownError extends Error {
   }
 }
 
+export type ServicePolicyCode =
+  | 'KILL_SWITCH_ACTIVE'
+  | 'INSUFFICIENT_FEE_PAYER_BALANCE'
+  | 'BALANCE_UNAVAILABLE'
+  | 'EXECUTION_DISABLED'
+
+export class ServicePolicyError extends Error {
+  override readonly name = 'ServicePolicyError'
+
+  constructor(readonly code: ServicePolicyCode) {
+    super('Fee sponsorship is unavailable')
+  }
+}
+
 export class SponsorService {
   private readonly attempts = new Map<string, Promise<SponsorshipResult>>()
 
   constructor(
     private readonly config: Pick<
       FeePayerConfig,
-      'tokenContract' | 'maxGas' | 'chainId'
+      | 'tokenContract'
+      | 'maxGas'
+      | 'chainId'
+      | 'killSwitchActive'
+      | 'minimumReserveWei'
     >,
     private readonly dependencies: SponsorDependencies,
   ) {}
 
   async sponsor(raw: unknown): Promise<SponsorshipResult> {
+    if (this.config.killSwitchActive) {
+      throw new ServicePolicyError('KILL_SWITCH_ACTIVE')
+    }
+
     const sender = validateSenderTransaction(
       raw,
       this.config.tokenContract,
@@ -87,7 +110,6 @@ export class SponsorService {
 
     try {
       const result = await attempt
-      if (result.status === 'reverted') this.attempts.delete(fingerprint)
       return result
     } catch (error) {
       if (error instanceof TransactionPolicyError) {
@@ -100,6 +122,16 @@ export class SponsorService {
   private async execute(
     sender: ReturnType<typeof validateSenderTransaction>,
   ): Promise<SponsorshipResult> {
+    let balance: bigint
+    try {
+      balance = await this.dependencies.getFeePayerBalance()
+    } catch {
+      throw new ServicePolicyError('BALANCE_UNAVAILABLE')
+    }
+    if (balance < this.config.minimumReserveWei) {
+      throw new ServicePolicyError('INSUFFICIENT_FEE_PAYER_BALANCE')
+    }
+
     let fullRaw: Hex
     try {
       fullRaw = await this.dependencies.signAsFeePayer(sender.raw)
@@ -169,27 +201,28 @@ export class SponsorService {
 
 export function createSponsorDependencies(
   config: FeePayerConfig,
+  signer: FeePayerSigner = createFeePayerSigner(config),
 ): SponsorDependencies {
-  assertFeePayerExecutionAllowed(config.profile)
-  if (config.privateKey === null) {
-    throw new Error('Fee-payer signing key is unavailable')
+  try {
+    assertFeePayerExecutionAllowed(config.profile)
+  } catch (error) {
+    if (error instanceof NetworkExecutionDisabledError) {
+      throw new ServicePolicyError('EXECUTION_DISABLED')
+    }
+    throw error
   }
-
-  const account = privateKeyToAccount(config.privateKey)
-  const wallet = createWalletClient({
-    account,
-    chain: config.profile.chain,
-    transport: http(config.rpcUrl, { retryCount: 0, timeout: 10_000 }),
-  })
+  if (!config.profile.signingEnabled || !config.profile.broadcastEnabled) {
+    throw new ServicePolicyError('EXECUTION_DISABLED')
+  }
   const publicClient = createPublicClient({
     chain: config.profile.chain,
     transport: http(config.rpcUrl, { retryCount: 0, timeout: 10_000 }),
   })
 
   return {
-    feePayerAddress: account.address,
+    feePayerAddress: signer.address,
     signAsFeePayer: async (senderRaw) =>
-      (await wallet.signTransactionAsFeePayer(senderRaw)) as Hex,
+      (await signer.signAsFeePayer({ senderRaw })).signedRaw,
     recoverSender: async (fullRaw) => {
       const result = await rpc<Address>(config.rpcUrl, {
         method: 'kaia_recoverFromTransaction',
@@ -217,6 +250,8 @@ export function createSponsorDependencies(
         status: receipt.status,
       }
     },
+    getFeePayerBalance: () =>
+      publicClient.getBalance({ address: signer.address }),
   }
 }
 
@@ -238,7 +273,7 @@ async function rpc<Result>(
       signal: AbortSignal.timeout(10_000),
     })
   } catch (error) {
-    throw new Error('Kairos RPC transport failure', { cause: error })
+    throw new Error('Kaia RPC transport failure', { cause: error })
   }
   if (!response.ok) throw new Error('Kairos RPC HTTP failure')
 

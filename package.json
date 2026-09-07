@@ -5,11 +5,15 @@
   "type": "module",
   "packageManager": "pnpm@11.13.1",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "clean": "node scripts/clean-dist.mjs",
+    "build": "corepack pnpm clean && tsc -p tsconfig.build.json",
+    "build:test": "corepack pnpm clean && tsc -p tsconfig.json",
     "prestart": "corepack pnpm build",
-    "setup:kairos": "corepack pnpm build && node dist/src/setup-kairos.js",
+    "setup:kairos": "tsc -p tsconfig.tools.json && node dist/tools/setup-kairos.js",
+    "readiness:mainnet": "corepack pnpm build && node dist/src/mainnet-readiness.js",
+    "start:mainnet-staging-health": "corepack pnpm build && node --env-file-if-exists=.env dist/src/mainnet-staging-server.js",
     "start": "node --env-file-if-exists=.env dist/src/server.js",
-    "test": "corepack pnpm build && node --test dist/tests/*.test.js",
+    "test": "corepack pnpm build:test && node --test dist/tests/*.test.js",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {

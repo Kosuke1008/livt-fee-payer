@@ -23,6 +23,8 @@ const PROFILE_DEFINITIONS = Object.freeze({
       decimals: 18,
     }),
     executionEnabled: true,
+    signingEnabled: true,
+    broadcastEnabled: true,
   }),
   'kaia-mainnet': Object.freeze({
     id: 'kaia-mainnet',
@@ -39,8 +41,10 @@ const PROFILE_DEFINITIONS = Object.freeze({
       symbol: 'JPYC',
       decimals: 18,
     }),
-    // No Mainnet signer or broadcast adapter exists in Phase 1.
+    // Phase 8 keeps Mainnet execution/signing/broadcast structurally disabled.
     executionEnabled: false,
+    signingEnabled: false,
+    broadcastEnabled: false,
   }),
 } as const)
 
@@ -49,6 +53,7 @@ export type NetworkProfileDefinition =
 
 export type NetworkProfile = NetworkProfileDefinition & {
   readonly rpcUrl: string
+  readonly secondaryRpcUrl: string | null
 }
 
 export class NetworkProfileError extends Error {
@@ -79,6 +84,24 @@ export function resolveNetworkProfile(
       ? environment.FEE_PAYER_KAIROS_RPC_URL ?? environment.KAIROS_RPC_URL
       : environment.FEE_PAYER_KAIA_MAINNET_RPC_URL
   const rpcUrl = resolveRpcUrl(configuredRpc, definition.chainName)
+  const secondaryRpcUrl =
+    networkId === 'kaia-mainnet' &&
+    environment.FEE_PAYER_KAIA_MAINNET_SECONDARY_RPC_URL !== undefined
+      ? resolveRpcUrl(
+          environment.FEE_PAYER_KAIA_MAINNET_SECONDARY_RPC_URL,
+          `${definition.chainName} secondary`,
+        )
+      : null
+
+  if (networkId === 'kaia-mainnet') {
+    assertMainnetRpcIsDedicated(rpcUrl)
+    if (secondaryRpcUrl !== null) assertMainnetRpcIsDedicated(secondaryRpcUrl)
+    if (secondaryRpcUrl === rpcUrl) {
+      throw new NetworkProfileError(
+        'Mainnet primary and secondary RPC URLs must be distinct',
+      )
+    }
+  }
 
   const configuredChainId = environment.FEE_PAYER_CHAIN_ID
   if (
@@ -104,7 +127,7 @@ export function resolveNetworkProfile(
     'FEE_PAYER_MAINNET_ENABLED',
   )
 
-  return Object.freeze({ ...definition, rpcUrl })
+  return Object.freeze({ ...definition, rpcUrl, secondaryRpcUrl })
 }
 
 export function assertFeePayerExecutionAllowed(
@@ -143,5 +166,19 @@ function resolveRpcUrl(value: string | undefined, label: string): string {
 function validateBooleanFlag(value: string | undefined, name: string): void {
   if (value !== undefined && value !== '' && value !== 'true' && value !== 'false') {
     throw new NetworkProfileError(`${name} must be true or false`)
+  }
+}
+
+function assertMainnetRpcIsDedicated(value: string): void {
+  const host = new URL(value).hostname.toLowerCase()
+  if (
+    host === 'public-en.node.kaia.io' ||
+    host === 'archive-en.node.kaia.io' ||
+    host === 'public-en-kairos.node.kaia.io' ||
+    host === 'archive-en-kairos.node.kaia.io'
+  ) {
+    throw new NetworkProfileError(
+      'Kaia public Mainnet RPC is not permitted for the production profile',
+    )
   }
 }

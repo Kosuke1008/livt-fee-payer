@@ -1,4 +1,9 @@
-import { createPublicClient, http } from 'viem'
+import {
+  createPublicClient,
+  formatEther,
+  http,
+  type Address,
+} from 'viem'
 import type { FeePayerConfig } from './config.js'
 import {
   NetworkProfileError,
@@ -51,6 +56,98 @@ export async function assertNetworkReady(
     decimals !== config.profile.jpyc.decimals
   ) {
     throw new Error(`${config.profile.chainName} fee payer is not ready`)
+  }
+}
+
+export interface MainnetReadinessResult {
+  readonly ready: boolean
+  readonly feePayerAddress: Address
+  readonly balanceWei: bigint
+  readonly balanceKaia: string
+  readonly latestBlock: bigint
+  readonly secondaryLatestBlock: bigint | null
+}
+
+export async function checkMainnetReadiness(
+  config: FeePayerConfig,
+): Promise<MainnetReadinessResult> {
+  if (
+    config.networkId !== 'kaia-mainnet' ||
+    config.profile.executionEnabled ||
+    config.profile.signingEnabled ||
+    config.profile.broadcastEnabled ||
+    config.mainnetEnabled ||
+    config.selfHostedMainnetEnabled ||
+    config.mainnetSigningEnabled ||
+    config.mainnetBroadcastEnabled ||
+    !config.killSwitchActive ||
+    config.signerType !== 'external' ||
+    config.feePayerAddress === null ||
+    config.minimumReserveWei <= 0n
+  ) {
+    throw new NetworkProfileError(
+      'Mainnet fee-payer readiness policy is not safely disabled',
+    )
+  }
+
+  const primary = createPublicClient({
+    chain: config.profile.chain,
+    transport: http(config.rpcUrl, { retryCount: 0, timeout: 10_000 }),
+  })
+  const [chainId, bytecode, symbol, decimals, balanceWei, latestBlock] =
+    await Promise.all([
+      primary.getChainId(),
+      primary.getBytecode({ address: config.tokenContract }),
+      primary.readContract({
+        abi: tokenMetadataAbi,
+        address: config.tokenContract,
+        functionName: 'symbol',
+      }),
+      primary.readContract({
+        abi: tokenMetadataAbi,
+        address: config.tokenContract,
+        functionName: 'decimals',
+      }),
+      primary.getBalance({ address: config.feePayerAddress }),
+      primary.getBlockNumber(),
+    ])
+
+  if (
+    chainId !== config.profile.chainId ||
+    bytecode === undefined ||
+    symbol !== config.profile.jpyc.symbol ||
+    decimals !== config.profile.jpyc.decimals ||
+    balanceWei < config.minimumReserveWei
+  ) {
+    throw new NetworkProfileError('Mainnet fee-payer RPC readiness failed')
+  }
+
+  let secondaryLatestBlock: bigint | null = null
+  if (config.profile.secondaryRpcUrl !== null) {
+    const secondary = createPublicClient({
+      chain: config.profile.chain,
+      transport: http(config.profile.secondaryRpcUrl, {
+        retryCount: 0,
+        timeout: 10_000,
+      }),
+    })
+    const [secondaryChainId, block] = await Promise.all([
+      secondary.getChainId(),
+      secondary.getBlockNumber(),
+    ])
+    if (secondaryChainId !== config.profile.chainId) {
+      throw new NetworkProfileError('Secondary Mainnet RPC chain mismatch')
+    }
+    secondaryLatestBlock = block
+  }
+
+  return {
+    ready: true,
+    feePayerAddress: config.feePayerAddress,
+    balanceWei,
+    balanceKaia: formatEther(balanceWei),
+    latestBlock,
+    secondaryLatestBlock,
   }
 }
 

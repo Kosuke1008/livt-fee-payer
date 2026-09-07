@@ -3,6 +3,7 @@ import { createServer, type IncomingMessage, type Server } from 'node:http'
 import type { Address } from 'viem'
 import type { NetworkId } from './network-profiles.js'
 import {
+  ServicePolicyError,
   SponsorshipStatusUnknownError,
   type SponsorService,
 } from './sponsor.js'
@@ -24,6 +25,10 @@ export type FeePayerDiagnosticCode =
   | 'RECEIPT_HASH_MISMATCH'
   | 'REVERTED'
   | 'INTERNAL_ERROR'
+  | 'EXECUTION_DISABLED'
+  | 'KILL_SWITCH_ACTIVE'
+  | 'INSUFFICIENT_FEE_PAYER_BALANCE'
+  | 'BALANCE_UNAVAILABLE'
 
 export function createFeePayerServer(options: {
   readonly apiKey: string
@@ -93,6 +98,14 @@ export function createFeePayerServer(options: {
       if (error instanceof SponsorshipStatusUnknownError) {
         logDiagnostic(diagnosticCode(error))
         respond(response, 503, { status: false, error: 'INTERNAL_ERROR' })
+        return
+      }
+      if (error instanceof ServicePolicyError) {
+        logDiagnostic(error.code)
+        respond(response, 503, {
+          status: false,
+          error: 'SERVICE_UNAVAILABLE',
+        })
         return
       }
       logDiagnostic('INTERNAL_ERROR')

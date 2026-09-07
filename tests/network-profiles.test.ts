@@ -31,9 +31,37 @@ test('resolves Mainnet metadata but never enables Phase 1 execution', () => {
 
   assert.equal(profile.chainId, 8217)
   assert.equal(profile.executionEnabled, false)
+  assert.equal(profile.signingEnabled, false)
+  assert.equal(profile.broadcastEnabled, false)
   assert.throws(
     () => assertFeePayerExecutionAllowed(profile),
     NetworkExecutionDisabledError,
+  )
+})
+
+test('rejects public or duplicated Mainnet RPC providers', () => {
+  for (const rpcUrl of [
+    'https://public-en.node.kaia.io',
+    'https://public-en-kairos.node.kaia.io',
+  ]) {
+    assert.throws(
+      () =>
+        resolveNetworkProfile({
+          BLOCKCHAIN_NETWORK: 'kaia-mainnet',
+          FEE_PAYER_KAIA_MAINNET_RPC_URL: rpcUrl,
+        }),
+      NetworkProfileError,
+    )
+  }
+  assert.throws(
+    () =>
+      resolveNetworkProfile({
+        BLOCKCHAIN_NETWORK: 'kaia-mainnet',
+        FEE_PAYER_KAIA_MAINNET_RPC_URL: 'https://mainnet.example.test',
+        FEE_PAYER_KAIA_MAINNET_SECONDARY_RPC_URL:
+          'https://mainnet.example.test',
+      }),
+    NetworkProfileError,
   )
 })
 

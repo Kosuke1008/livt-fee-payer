@@ -6,7 +6,10 @@ import {
   type FeePayerDiagnosticCode,
 } from '../src/http.js'
 import { TransactionPolicyError } from '../src/policy.js'
-import { SponsorshipStatusUnknownError } from '../src/sponsor.js'
+import {
+  ServicePolicyError,
+  SponsorshipStatusUnknownError,
+} from '../src/sponsor.js'
 import { SENDER, SENDER_RAW } from './fixtures.js'
 
 const API_KEY = 'b'.repeat(64)
@@ -147,6 +150,33 @@ test('logs only fixed diagnostic codes for malformed, reverted, and unexpected f
   const output = JSON.stringify(diagnostics)
   assert.equal(output.includes(API_KEY), false)
   assert.equal(output.includes(SENDER_RAW), false)
+})
+
+test('kill switch response is fixed and redacts internal values', async (context) => {
+  const diagnostics: FeePayerDiagnosticCode[] = []
+  const server = createFeePayerServer({
+    apiKey: API_KEY,
+    networkId: 'kairos',
+    feePayerAddress: SENDER,
+    sponsorService: {
+      sponsor: async () => {
+        throw new ServicePolicyError('KILL_SWITCH_ACTIVE')
+      },
+    },
+    logDiagnostic: (code) => diagnostics.push(code),
+  })
+  const url = await listen(server)
+  context.after(() => server.close())
+
+  const response = await post(url, SENDER_RAW)
+  assert.equal(response.status, 503)
+  assert.deepEqual(await response.json(), {
+    status: false,
+    error: 'SERVICE_UNAVAILABLE',
+  })
+  assert.deepEqual(diagnostics, ['KILL_SWITCH_ACTIVE'])
+  assert.equal(JSON.stringify(diagnostics).includes(API_KEY), false)
+  assert.equal(JSON.stringify(diagnostics).includes(SENDER_RAW), false)
 })
 
 async function listen(server: ReturnType<typeof createFeePayerServer>): Promise<URL> {
