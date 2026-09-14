@@ -6,12 +6,12 @@ LivT Walletがブラウザ内で署名したtransactionへFee Payer署名を追�
 Kairosへbroadcastします。Kaia Managed Fee DelegationはLaravel側の将来選択肢として
 残しますが、このserviceから自動fallbackしません。
 
-> 現在はKairos実証専用です。Mainnetでは使用できません。
+> Mainnet向けAWS KMS signerは検証可能ですが、Mainnet実行はcode-level gateで無効です。
 
 ネットワークはapplication環境から推測せず、`BLOCKCHAIN_NETWORK=kairos`で
 明示します。`kaia-mainnet` profileもchain ID 8217、JPYC、explorer、RPCの
-検証用metadataとして存在しますが、Phase 8でもサーバ起動・署名・broadcastを
-常に拒否します。Mainnet profileのexecution/signing/broadcast policyはcode上でfalseです。
+検証用metadataとして存在します。Phase 9.5ではKMS metadata healthと明示的offline署名だけを提供し、
+Mainnet payment pathのexecution/signing/broadcast policyはcode上でfalseです。
 
 ## 処理フロー
 
@@ -36,8 +36,8 @@ LivT Laravel
 
 - `127.0.0.1`だけで待ち受け、外部公開しません。
 - Walletのmnemonic、秘密鍵、パスワード、復号済み情報を受け取りません。
-- Kairos local signerだけがprocess秘密鍵を利用します。Mainnetはexternal signer addressの
-  構造確認のみで、KMS/HSM adapterやprocess local keyは実装していません。
+- Kairos local signerだけがprocess秘密鍵を利用します。MainnetはAWS KMSにdigest署名を要求し、
+  process local keyを拒否します。KMS公開鍵からaddressを導出し、DER署名をrecover検証します。
 - sender署名済みRLPとFee Payer署名済みRLPをログへ出しません。
 - Kairos、transaction type `0x31`、JPYC contract、ERC-20 `transfer`、value 0、
   gas上限、署名前後のfieldを検証します。
@@ -100,27 +100,53 @@ corepack pnpm review:kairos-fee-delegated-live
 
 ## Mainnetについて
 
-Phase 8のread-only構造確認コマンドは次です。Mainnet keyを読み込まず、署名・broadcastを
+Phase 11のreadinessコマンドは次です。Mainnet private keyを読み込まず、署名・broadcastを
 行わず、すべてのMainnet execution gateがfalseでkill switchがactiveの場合だけ成功します。
 
 ```bash
 corepack pnpm readiness:mainnet
 ```
 
-Phase 9 stagingでは、同じread-only検査に合格した場合だけlocalhost health processを起動できます。
-このentry pointにはsigning routeがなく、external signerは`UNAVAILABLE`、kill switchは`ACTIVE`、
+Mainnet残高を照会できれば、minimum reserve未満でもread-only readinessは成功し、
+`funding_status=NOT_FUNDED`として現在残高とminimum reserveを明示します。reserve以上なら
+`funding_status=FUNDED`です。これは実行許可ではなく、Phase 12のsponsorshipは従来どおり
+reserve未満を署名前に拒否します。
+
+未入金環境では、公開値部分が次の形になります。
+
+```text
+balance_wei=0
+balance_kaia=0
+minimum_reserve_wei=<configured reserve in wei>
+minimum_reserve_kaia=<configured reserve in KAIA>
+funding_status=NOT_FUNDED
+execution=disabled
+signing=disabled
+broadcast=disabled
+readiness=READ_ONLY_READY
+```
+
+Phase 11 stagingでは、同じread-only検査とKMS metadata healthをlocalhostから監視できます。
+このentry pointにはsigning routeがなく、healthyならexternal signerは`SIGNER_READY`、kill switchは`ACTIVE`、
 execution/signing/broadcastは`DISABLED`として報告されます。
 
 ```bash
 corepack pnpm start:mainnet-staging-health
 ```
 
-`FeePayerSigner`は`senderRaw`を受けて`signedRaw`を返し、addressとhealthを提供する契約です。
-Kairos local signerだけが署名可能で、Mainnet external signerはPhase 9では常にunavailableです。
+`FeePayerSigner`は`senderRaw`を受けて`signedRaw`を返し、address/type/safe metadata/healthを提供します。
+実KMSへ固定test digestの署名を1回だけ要求し、recover検証する明示的なoffline commandは次です。
+
+```bash
+corepack pnpm signer:test-mainnet
+```
+
+このcommandはPayment、RPC、broadcastを使いません。運用詳細はplatform repositoryの
+`docs/external-signer-runbook.md`を参照してください。
 
 Mainnetでは、少なくとも次の対応が完了するまで有効化しません。
 
-- external signerをKMS/HSMへ接続し、独立security reviewを完了
+- 実AWS KMS key/IAMを構築し、offline proofと独立security reviewを完了
 - 永続的な冪等性と結果不明transactionの復旧
 - 利用上限、rate limit、監査ログ、残高監視、緊急停止
 - Mainnet用chain・contract・RPC・鍵の完全分離

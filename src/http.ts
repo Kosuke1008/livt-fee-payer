@@ -4,6 +4,7 @@ import type { Address } from 'viem'
 import type { NetworkId } from './network-profiles.js'
 import {
   ServicePolicyError,
+  SignerOperationError,
   SponsorshipStatusUnknownError,
   type SponsorService,
 } from './sponsor.js'
@@ -29,12 +30,24 @@ export type FeePayerDiagnosticCode =
   | 'KILL_SWITCH_ACTIVE'
   | 'INSUFFICIENT_FEE_PAYER_BALANCE'
   | 'BALANCE_UNAVAILABLE'
+  | 'SIGNER_UNAVAILABLE'
+  | 'SIGNER_TIMEOUT'
+  | 'AUTHENTICATION_FAILURE'
+  | 'INVALID_SIGNATURE'
+  | 'INVALID_KEY'
+  | 'KEY_MISMATCH'
+  | 'SIGNING_FAILURE'
+  | 'PILOT_POLICY_NOT_READY'
+  | 'ATTEMPT_LEDGER_FULL'
+  | 'PAYMENT_EXPIRED'
 
 export function createFeePayerServer(options: {
   readonly apiKey: string
   readonly networkId: NetworkId
   readonly feePayerAddress: Address
   readonly sponsorService: Pick<SponsorService, 'sponsor'>
+  readonly sponsorshipAvailable?: () => boolean
+  readonly health?: () => Promise<Record<string, unknown>>
   readonly logDiagnostic?: (code: FeePayerDiagnosticCode) => void
 }): Server {
   const logDiagnostic = options.logDiagnostic ?? defaultDiagnosticLogger
@@ -44,14 +57,20 @@ export function createFeePayerServer(options: {
     response.setHeader('Cache-Control', 'no-store')
 
     if (request.method === 'GET' && request.url === '/health') {
-      response.writeHead(200)
-      response.end(
-        JSON.stringify({
-          status: 'ok',
-          network: options.networkId,
-          fee_payer_address: options.feePayerAddress,
-        }),
-      )
+      try {
+        const health = options.health === undefined
+          ? {
+              status: 'ok',
+              network: options.networkId,
+              fee_payer_address: options.feePayerAddress,
+            }
+          : await options.health()
+        response.writeHead(200)
+        response.end(JSON.stringify(health))
+      } catch {
+        response.writeHead(503)
+        response.end(JSON.stringify({ status: 'NOT_READY' }))
+      }
       return
     }
 
@@ -63,6 +82,11 @@ export function createFeePayerServer(options: {
       respond(response, 401, { status: false, error: 'BAD_REQUEST' })
       return
     }
+    if (options.sponsorshipAvailable?.() === false) {
+      logDiagnostic('EXECUTION_DISABLED')
+      respond(response, 503, { status: false, error: 'SERVICE_UNAVAILABLE' })
+      return
+    }
     if (!request.headers['content-type']?.startsWith('application/json')) {
       respond(response, 415, { status: false, error: 'BAD_REQUEST' })
       return
@@ -70,8 +94,11 @@ export function createFeePayerServer(options: {
 
     try {
       const body = await readJson(request)
-      const raw = bodyValue(body)
-      const result = await options.sponsorService.sponsor(raw)
+      const values = bodyValue(body)
+      const result = await options.sponsorService.sponsor(values.raw, {
+        paymentId: values.paymentId,
+        expiresAt: values.expiresAt,
+      })
 
       if (result.status === 'reverted') logDiagnostic('REVERTED')
 
@@ -100,11 +127,19 @@ export function createFeePayerServer(options: {
         respond(response, 503, { status: false, error: 'INTERNAL_ERROR' })
         return
       }
+      if (error instanceof SignerOperationError) {
+        logDiagnostic(error.code)
+        respond(response, 503, { status: false, error: error.code })
+        return
+      }
       if (error instanceof ServicePolicyError) {
         logDiagnostic(error.code)
         respond(response, 503, {
           status: false,
-          error: 'SERVICE_UNAVAILABLE',
+          error: error.code === 'KILL_SWITCH_ACTIVE'
+            || error.code === 'PAYMENT_EXPIRED'
+            ? error.code
+            : 'SERVICE_UNAVAILABLE',
         })
         return
       }
@@ -159,11 +194,22 @@ async function readJson(request: IncomingMessage): Promise<unknown> {
   return JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown
 }
 
-function bodyValue(body: unknown): unknown {
-  if (typeof body !== 'object' || body === null) return undefined
+function bodyValue(body: unknown): {
+  readonly raw: unknown
+  readonly paymentId: unknown
+  readonly expiresAt: unknown
+} {
+  if (typeof body !== 'object' || body === null) {
+    return { raw: undefined, paymentId: undefined, expiresAt: undefined }
+  }
   const userSignedTx = Reflect.get(body, 'userSignedTx')
-  if (typeof userSignedTx !== 'object' || userSignedTx === null) return undefined
-  return Reflect.get(userSignedTx, 'raw')
+  return {
+    raw: typeof userSignedTx === 'object' && userSignedTx !== null
+      ? Reflect.get(userSignedTx, 'raw')
+      : undefined,
+    paymentId: Reflect.get(body, 'paymentId'),
+    expiresAt: Reflect.get(body, 'expiresAt'),
+  }
 }
 
 function respond(

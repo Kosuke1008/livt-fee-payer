@@ -15,12 +15,18 @@ import {
   assertFeePayerExecutionAllowed,
   NetworkExecutionDisabledError,
 } from './network-profiles.js'
-import { createFeePayerSigner, type FeePayerSigner } from './signer.js'
+import {
+  createFeePayerSigner,
+  ExternalSignerError,
+  type ExternalSignerErrorCode,
+  type FeePayerSigner,
+} from './signer.js'
 import {
   TransactionPolicyError,
   validateFeePayerTransaction,
   validateSenderTransaction,
 } from './policy.js'
+import { isKillSwitchActive } from './kill-switch.js'
 
 export interface SponsorshipReceipt {
   readonly transactionHash: Hash
@@ -34,6 +40,8 @@ export interface SponsorDependencies {
   readonly broadcast: (fullRaw: Hex) => Promise<Hash>
   readonly waitForReceipt: (hash: Hash) => Promise<SponsorshipReceipt>
   readonly getFeePayerBalance: () => Promise<bigint>
+  readonly assertSigningAllowed?: () => void
+  readonly assertBroadcastAllowed?: () => void
 }
 
 export interface SponsorshipResult {
@@ -60,11 +68,22 @@ export class SponsorshipStatusUnknownError extends Error {
   }
 }
 
+export class SignerOperationError extends Error {
+  override readonly name = 'SignerOperationError'
+
+  constructor(readonly code: ExternalSignerErrorCode) {
+    super('Fee-payer signing failed before broadcast')
+  }
+}
+
 export type ServicePolicyCode =
   | 'KILL_SWITCH_ACTIVE'
   | 'INSUFFICIENT_FEE_PAYER_BALANCE'
   | 'BALANCE_UNAVAILABLE'
   | 'EXECUTION_DISABLED'
+  | 'PILOT_POLICY_NOT_READY'
+  | 'ATTEMPT_LEDGER_FULL'
+  | 'PAYMENT_EXPIRED'
 
 export class ServicePolicyError extends Error {
   override readonly name = 'ServicePolicyError'
@@ -85,11 +104,15 @@ export class SponsorService {
       | 'chainId'
       | 'killSwitchActive'
       | 'minimumReserveWei'
-    >,
+    > & Partial<Pick<FeePayerConfig, 'networkId' | 'pilotPolicy'>>,
     private readonly dependencies: SponsorDependencies,
+    private readonly now: () => number = Date.now,
   ) {}
 
-  async sponsor(raw: unknown): Promise<SponsorshipResult> {
+  async sponsor(
+    raw: unknown,
+    context?: { readonly paymentId: unknown; readonly expiresAt: unknown },
+  ): Promise<SponsorshipResult> {
     if (this.config.killSwitchActive) {
       throw new ServicePolicyError('KILL_SWITCH_ACTIVE')
     }
@@ -100,13 +123,35 @@ export class SponsorService {
       this.config.maxGas,
       this.config.chainId,
     )
+    let expiresAt: number | null = null
+    if (this.config.networkId === 'kaia-mainnet') {
+      expiresAt = typeof context?.expiresAt === 'string'
+        ? Date.parse(context.expiresAt)
+        : Number.NaN
+      if (this.config.pilotPolicy?.ready !== true
+        || String(context?.paymentId ?? '') !== this.config.pilotPolicy.pilot_payment_id
+        || !Number.isFinite(expiresAt)
+        || expiresAt <= this.now()) {
+        throw new ServicePolicyError('PILOT_POLICY_NOT_READY')
+      }
+    }
     const fingerprint = createHash('sha256').update(sender.raw).digest('hex')
     const existing = this.attempts.get(fingerprint)
-    if (existing !== undefined) return existing
+    if (existing !== undefined) {
+      if (this.config.networkId === 'kaia-mainnet') {
+        throw new ServicePolicyError('ATTEMPT_LEDGER_FULL')
+      }
+      return existing
+    }
+    if (this.config.networkId === 'kaia-mainnet' && this.attempts.size >= 1) {
+      throw new ServicePolicyError('ATTEMPT_LEDGER_FULL')
+    }
+    if (this.attempts.size >= 1000) {
+      throw new ServicePolicyError('ATTEMPT_LEDGER_FULL')
+    }
 
-    const attempt = this.execute(sender)
+    const attempt = this.execute(sender, expiresAt)
     this.attempts.set(fingerprint, attempt)
-    this.trimAttempts()
 
     try {
       const result = await attempt
@@ -121,6 +166,7 @@ export class SponsorService {
 
   private async execute(
     sender: ReturnType<typeof validateSenderTransaction>,
+    expiresAt: number | null,
   ): Promise<SponsorshipResult> {
     let balance: bigint
     try {
@@ -128,17 +174,37 @@ export class SponsorService {
     } catch {
       throw new ServicePolicyError('BALANCE_UNAVAILABLE')
     }
-    if (balance < this.config.minimumReserveWei) {
+    let requiredBalance = this.config.minimumReserveWei
+    if (this.config.networkId === 'kaia-mainnet') {
+      const policy = this.config.pilotPolicy
+      if (policy?.ready !== true || policy.max_gas_price_wei === ''
+        || policy.maximum_balance_wei === '' || policy.merchant_address === ''
+        || policy.sender_address === ''
+        || policy.max_payment_jpyc !== '1'
+        || sender.gasLimit > BigInt(policy.max_gas)
+        || sender.gasPrice > BigInt(policy.max_gas_price_wei)
+        || sender.recipient.toLowerCase() !== policy.merchant_address
+        || sender.sender.toLowerCase() !== policy.sender_address
+        || sender.atomicAmount !== 10n ** 18n
+        || balance > BigInt(policy.maximum_balance_wei)) {
+        throw new ServicePolicyError('PILOT_POLICY_NOT_READY')
+      }
+      requiredBalance += sender.gasLimit * sender.gasPrice
+    }
+    if (balance < requiredBalance) {
       throw new ServicePolicyError('INSUFFICIENT_FEE_PAYER_BALANCE')
     }
 
+    this.assertNotExpired(expiresAt)
+    this.dependencies.assertSigningAllowed?.()
     let fullRaw: Hex
     try {
       fullRaw = await this.dependencies.signAsFeePayer(sender.raw)
     } catch (error) {
-      throw new SponsorshipStatusUnknownError('signing', {
-        cause: error,
-      })
+      if (error instanceof ServicePolicyError) throw error
+      throw new SignerOperationError(
+        error instanceof ExternalSignerError ? error.code : 'SIGNING_FAILURE',
+      )
     }
 
     validateFeePayerTransaction(
@@ -163,6 +229,8 @@ export class SponsorService {
     }
 
     const expectedHash = keccak256(fullRaw)
+    this.assertNotExpired(expiresAt)
+    this.dependencies.assertBroadcastAllowed?.()
     let broadcastHash: Hash
     try {
       broadcastHash = await this.dependencies.broadcast(fullRaw)
@@ -190,13 +258,13 @@ export class SponsorService {
     return { hash: expectedHash, status: receipt.status }
   }
 
-  private trimAttempts(): void {
-    while (this.attempts.size > 1000) {
-      const oldest = this.attempts.keys().next().value as string | undefined
-      if (oldest === undefined) return
-      this.attempts.delete(oldest)
+  private assertNotExpired(expiresAt: number | null): void {
+    if (this.config.networkId === 'kaia-mainnet'
+      && (expiresAt === null || expiresAt <= this.now())) {
+      throw new ServicePolicyError('PAYMENT_EXPIRED')
     }
   }
+
 }
 
 export function createSponsorDependencies(
@@ -214,6 +282,24 @@ export function createSponsorDependencies(
   if (!config.profile.signingEnabled || !config.profile.broadcastEnabled) {
     throw new ServicePolicyError('EXECUTION_DISABLED')
   }
+  const assertLiveGate = (stage: 'signing' | 'broadcast'): void => {
+    if (config.networkId !== 'kaia-mainnet') return
+    if (!config.activationReleaseCapable
+      || !config.mainnetEnabled
+      || !config.selfHostedMainnetEnabled
+      || !config.mainnetSigningEnabled
+      || !config.mainnetBroadcastEnabled
+      || isKillSwitchActive(config.killSwitchActive)
+      || config.signerType !== 'external'
+      || config.mainnetSignerBackend !== 'aws-kms') {
+      throw new ServicePolicyError(
+        isKillSwitchActive(config.killSwitchActive) ? 'KILL_SWITCH_ACTIVE' : 'EXECUTION_DISABLED',
+      )
+    }
+    if (stage === 'signing' && !config.mainnetSigningEnabled) {
+      throw new ServicePolicyError('EXECUTION_DISABLED')
+    }
+  }
   const publicClient = createPublicClient({
     chain: config.profile.chain,
     transport: http(config.rpcUrl, { retryCount: 0, timeout: 10_000 }),
@@ -222,7 +308,10 @@ export function createSponsorDependencies(
   return {
     feePayerAddress: signer.address,
     signAsFeePayer: async (senderRaw) =>
-      (await signer.signAsFeePayer({ senderRaw })).signedRaw,
+      (await signer.signAsFeePayer({
+        senderRaw,
+        assertAssemblyAllowed: () => assertLiveGate('signing'),
+      })).signedRaw,
     recoverSender: async (fullRaw) => {
       const result = await rpc<Address>(config.rpcUrl, {
         method: 'kaia_recoverFromTransaction',
@@ -252,6 +341,8 @@ export function createSponsorDependencies(
     },
     getFeePayerBalance: () =>
       publicClient.getBalance({ address: signer.address }),
+    assertSigningAllowed: () => assertLiveGate('signing'),
+    assertBroadcastAllowed: () => assertLiveGate('broadcast'),
   }
 }
 
@@ -271,11 +362,17 @@ async function rpc<Result>(
         params: request.params,
       }),
       signal: AbortSignal.timeout(10_000),
+      redirect: 'error',
+      cache: 'no-store',
+      credentials: 'omit',
+      referrerPolicy: 'no-referrer',
     })
   } catch (error) {
     throw new Error('Kaia RPC transport failure', { cause: error })
   }
-  if (!response.ok) throw new Error('Kairos RPC HTTP failure')
+  if (!response.ok || Number(response.headers.get('content-length') ?? 0) > 1_000_000) {
+    throw new Error('Kaia RPC HTTP failure')
+  }
 
   let body: unknown
   try {
@@ -286,6 +383,8 @@ async function rpc<Result>(
   if (
     typeof body !== 'object' ||
     body === null ||
+    Reflect.get(body, 'jsonrpc') !== '2.0' ||
+    Reflect.get(body, 'id') !== 1 ||
     'error' in body ||
     !('result' in body)
   ) {

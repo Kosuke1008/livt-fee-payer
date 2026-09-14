@@ -6,11 +6,7 @@ import { createFeePayerSigner } from './signer.js'
 async function main(): Promise<void> {
   const config = loadConfig()
   await checkMainnetReadiness(config)
-  const signer = await createFeePayerSigner(config).health()
-
-  if (signer.status !== 'unavailable') {
-    throw new Error('Mainnet staging signer must remain unavailable')
-  }
+  const signer = createFeePayerSigner(config)
 
   const server = createServer(async (request, response) => {
     response.setHeader('Content-Type', 'application/json; charset=utf-8')
@@ -19,14 +15,25 @@ async function main(): Promise<void> {
     if (request.method === 'GET' && request.url === '/health') {
       try {
         const current = await checkMainnetReadiness(config)
-        response.writeHead(200)
+        const signerHealth = await signer.health()
+        response.writeHead(signerHealth.status === 'ready' ? 200 : 503)
         response.end(JSON.stringify({
-          status: 'STRUCTURALLY_READY',
+          status: 'READ_ONLY_READY',
           network: config.networkId,
           chain_id: config.chainId,
           fee_payer_address: current.feePayerAddress,
+          balance_wei: current.balanceWei.toString(),
           balance_kaia: current.balanceKaia,
-          signer_status: 'UNAVAILABLE',
+          minimum_reserve_wei: current.minimumReserveWei.toString(),
+          minimum_reserve_kaia: current.minimumReserveKaia,
+          funding_status: current.fundingStatus,
+          pilot_policy: config.pilotPolicy,
+          activation_release_capable: config.activationReleaseCapable,
+          signer_status: signerHealth.status === 'ready'
+            ? 'SIGNER_READY'
+            : 'SIGNER_NOT_READY',
+          signer_type: signerHealth.type,
+          signer_key_reference: signerHealth.metadata.keyReference,
           kill_switch: 'ACTIVE',
           execution: 'DISABLED',
           signing: 'DISABLED',
@@ -45,7 +52,7 @@ async function main(): Promise<void> {
 
   server.listen(config.port, config.host, () => {
     process.stdout.write(
-      `Mainnet staging read-only health listening on ${config.host}:${config.port}\n`,
+      `Mainnet staging health listening on ${config.host}:${config.port}\n`,
     )
   })
 }

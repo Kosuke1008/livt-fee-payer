@@ -41,7 +41,7 @@ const PROFILE_DEFINITIONS = Object.freeze({
       symbol: 'JPYC',
       decimals: 18,
     }),
-    // Phase 8 keeps Mainnet execution/signing/broadcast structurally disabled.
+    // Phase 9.5 keeps Mainnet execution/signing/broadcast structurally disabled.
     executionEnabled: false,
     signingEnabled: false,
     broadcastEnabled: false,
@@ -70,6 +70,7 @@ export class NetworkExecutionDisabledError extends Error {
 
 export function resolveNetworkProfile(
   environment: NodeJS.ProcessEnv,
+  mainnetActivationReleaseCapable = false,
 ): NetworkProfile {
   const networkId = environment.BLOCKCHAIN_NETWORK
   if (networkId !== 'kairos' && networkId !== 'kaia-mainnet') {
@@ -78,7 +79,15 @@ export function resolveNetworkProfile(
     )
   }
 
-  const definition = PROFILE_DEFINITIONS[networkId]
+  const baseDefinition = PROFILE_DEFINITIONS[networkId]
+  const definition = networkId === 'kaia-mainnet'
+    ? Object.freeze({
+        ...baseDefinition,
+        executionEnabled: mainnetActivationReleaseCapable,
+        signingEnabled: mainnetActivationReleaseCapable,
+        broadcastEnabled: mainnetActivationReleaseCapable,
+      })
+    : baseDefinition
   const configuredRpc =
     networkId === 'kairos'
       ? environment.FEE_PAYER_KAIROS_RPC_URL ?? environment.KAIROS_RPC_URL
@@ -127,7 +136,11 @@ export function resolveNetworkProfile(
     'FEE_PAYER_MAINNET_ENABLED',
   )
 
-  return Object.freeze({ ...definition, rpcUrl, secondaryRpcUrl })
+  return Object.freeze({
+    ...definition,
+    rpcUrl,
+    secondaryRpcUrl,
+  }) as unknown as NetworkProfile
 }
 
 export function assertFeePayerExecutionAllowed(

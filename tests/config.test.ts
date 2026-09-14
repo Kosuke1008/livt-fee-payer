@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { ConfigurationError, loadConfig } from '../src/config.js'
-import { createFeePayerSigner, SignerUnavailableError } from '../src/signer.js'
+import { createFeePayerSigner } from '../src/signer.js'
 import { TEST_PRIVATE_KEY, TOKEN } from './fixtures.js'
 
 const validEnvironment = {
@@ -57,6 +57,9 @@ test('loads Mainnet metadata without accepting a process private key', async () 
     FEE_PAYER_KAIA_MAINNET_ADDRESS: '0x1111111111111111111111111111111111111111',
     FEE_PAYER_KAIROS_ADDRESS: '0x2222222222222222222222222222222222222222',
     FEE_PAYER_MAINNET_SIGNER_TYPE: 'external',
+    FEE_PAYER_MAINNET_SIGNER_BACKEND: 'aws-kms',
+    FEE_PAYER_AWS_REGION: 'ap-northeast-1',
+    FEE_PAYER_AWS_KMS_KEY_ID: 'alias/livt-mainnet-fee-payer',
     FEE_PAYER_MIN_RESERVE_KAIA: '0.1',
     FEE_PAYER_MAINNET_ENABLED: 'true',
   })
@@ -65,10 +68,45 @@ test('loads Mainnet metadata without accepting a process private key', async () 
   assert.equal(config.chainId, 8217)
   assert.equal(config.localPrivateKey, null)
   assert.equal(config.profile.executionEnabled, false)
-  const signer = createFeePayerSigner(config)
-  assert.equal((await signer.health()).status, 'unavailable')
-  await assert.rejects(
-    () => signer.signAsFeePayer({ senderRaw: '0x31' }),
-    SignerUnavailableError,
-  )
+  assert.equal(createFeePayerSigner(config).type, 'aws-kms')
+})
+
+test('rejects incomplete Mainnet external signer configuration', () => {
+  const base = {
+    BLOCKCHAIN_NETWORK: 'kaia-mainnet',
+    FEE_PAYER_API_KEY: 'a'.repeat(64),
+    FEE_PAYER_KAIA_MAINNET_RPC_URL: 'https://mainnet.example.test',
+    FEE_PAYER_KAIA_MAINNET_ADDRESS: '0x1111111111111111111111111111111111111111',
+    FEE_PAYER_KAIROS_ADDRESS: '0x2222222222222222222222222222222222222222',
+    FEE_PAYER_MAINNET_SIGNER_TYPE: 'external',
+    FEE_PAYER_MIN_RESERVE_KAIA: '0.1',
+  }
+  assert.throws(() => loadConfig(base), ConfigurationError)
+  assert.throws(() => loadConfig({
+    ...base,
+    FEE_PAYER_MAINNET_SIGNER_BACKEND: 'aws-kms',
+    FEE_PAYER_AWS_REGION: 'ap-northeast-1',
+  }), ConfigurationError)
+})
+
+test('rejects every process-local key variable under Mainnet', () => {
+  const base = {
+    BLOCKCHAIN_NETWORK: 'kaia-mainnet',
+    FEE_PAYER_API_KEY: 'a'.repeat(64),
+    FEE_PAYER_KAIA_MAINNET_RPC_URL: 'https://mainnet.example.test',
+    FEE_PAYER_KAIA_MAINNET_ADDRESS: '0x1111111111111111111111111111111111111111',
+    FEE_PAYER_KAIROS_ADDRESS: '0x2222222222222222222222222222222222222222',
+    FEE_PAYER_MAINNET_SIGNER_TYPE: 'external',
+    FEE_PAYER_MAINNET_SIGNER_BACKEND: 'aws-kms',
+    FEE_PAYER_AWS_REGION: 'ap-northeast-1',
+    FEE_PAYER_AWS_KMS_KEY_ID: 'alias/livt-mainnet-fee-payer',
+    FEE_PAYER_MIN_RESERVE_KAIA: '0.1',
+  }
+  for (const name of [
+    'FEE_PAYER_PRIVATE_KEY',
+    'FEE_PAYER_KAIROS_PRIVATE_KEY',
+    'FEE_PAYER_KAIA_MAINNET_PRIVATE_KEY',
+  ]) {
+    assert.throws(() => loadConfig({ ...base, [name]: TEST_PRIVATE_KEY }), ConfigurationError)
+  }
 })

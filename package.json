@@ -11,12 +11,15 @@
     "prestart": "corepack pnpm build",
     "setup:kairos": "tsc -p tsconfig.tools.json && node dist/tools/setup-kairos.js",
     "readiness:mainnet": "corepack pnpm build && node dist/src/mainnet-readiness.js",
+    "signer:test-mainnet": "corepack pnpm build && node --env-file-if-exists=.env dist/src/test-mainnet-signer.js",
     "start:mainnet-staging-health": "corepack pnpm build && node --env-file-if-exists=.env dist/src/mainnet-staging-server.js",
+    "start:mainnet-live-pilot": "node --env-file-if-exists=.env dist/src/mainnet-live-pilot-server.js",
     "start": "node --env-file-if-exists=.env dist/src/server.js",
     "test": "corepack pnpm build:test && node --test dist/tests/*.test.js",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@aws-sdk/client-kms": "3.1127.0",
     "@kaiachain/viem-ext": "2.1.0",
     "viem": "2.55.10"
   },

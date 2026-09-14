@@ -1,4 +1,20 @@
 .env
+.env.*
+!.env.example
+# Operator RPC endpoints, Roles Anywhere and AWS material must stay local.
+.aws/
+credentials/
+secrets/
+certificates/
+*.pem
+*.key
+*.crt
+*.cer
+*.p12
+*.pfx
+*pilot*credentials*
 coverage/
 dist/
+mainnet-pilot-activation.json
+mainnet-kill-switch
 node_modules/

@@ -47,6 +47,9 @@ export interface ValidatedSenderTransaction {
   readonly sender: Address
   readonly tokenContract: Address
   readonly gasLimit: bigint
+  readonly gasPrice: bigint
+  readonly recipient: Address
+  readonly atomicAmount: bigint
   readonly data: Hex
   readonly transaction: Record<string, unknown>
 }
@@ -77,6 +80,7 @@ export function validateSenderTransaction(
   const sender = address(transaction.from)
   const to = address(transaction.to)
   const gasLimit = quantity(transaction.gasLimit)
+  const gasPrice = quantity(transaction.gasPrice)
   const value = quantity(transaction.value)
   const data = transaction.data
   const signatures = transaction.txSignatures
@@ -121,10 +125,13 @@ export function validateSenderTransaction(
   }
 
   return {
-    raw,
+    raw: raw.toLowerCase() as Hex,
     sender,
     tokenContract: to,
     gasLimit,
+    gasPrice,
+    recipient: address(`0x${recipientWord.slice(-40)}`),
+    atomicAmount: BigInt(`0x${amountWord}`),
     data,
     transaction,
   }

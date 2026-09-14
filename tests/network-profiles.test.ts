@@ -39,6 +39,16 @@ test('resolves Mainnet metadata but never enables Phase 1 execution', () => {
   )
 })
 
+test('Mainnet execution requires the reviewed release capability', () => {
+  const profile = resolveNetworkProfile({
+    BLOCKCHAIN_NETWORK: 'kaia-mainnet',
+    FEE_PAYER_KAIA_MAINNET_RPC_URL: 'https://mainnet.example.test',
+  }, true)
+  assert.equal(profile.executionEnabled, true)
+  assert.equal(profile.signingEnabled, true)
+  assert.equal(profile.broadcastEnabled, true)
+})
+
 test('rejects public or duplicated Mainnet RPC providers', () => {
   for (const rpcUrl of [
     'https://public-en.node.kaia.io',

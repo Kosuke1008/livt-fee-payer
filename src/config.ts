@@ -8,6 +8,8 @@ import {
   type NetworkId,
   type NetworkProfile,
 } from './network-profiles.js'
+import { inspectMainnetPilotPolicy, type MainnetPilotPolicy } from './pilot-policy.js'
+import { isMainnetActivationReleaseCapable } from './activation-release.js'
 
 export interface FeePayerConfig {
   readonly host: '127.0.0.1'
@@ -15,6 +17,10 @@ export interface FeePayerConfig {
   readonly apiKey: string
   readonly localPrivateKey: Hex | null
   readonly signerType: 'local-private-key' | 'external'
+  readonly mainnetSignerBackend: 'aws-kms' | null
+  readonly awsRegion: string | null
+  readonly awsKmsKeyId: string | null
+  readonly signerTimeoutMs: number
   readonly feePayerAddress: Address | null
   readonly kairosFeePayerAddress: Address | null
   readonly allowCrossNetworkIdentity: boolean
@@ -32,6 +38,8 @@ export interface FeePayerConfig {
   readonly selfHostedMainnetEnabled: boolean
   readonly mainnetSigningEnabled: boolean
   readonly mainnetBroadcastEnabled: boolean
+  readonly pilotPolicy: MainnetPilotPolicy | null
+  readonly activationReleaseCapable: boolean
 }
 
 export class ConfigurationError extends Error {
@@ -40,11 +48,12 @@ export class ConfigurationError extends Error {
 
 export function loadConfig(
   environment: NodeJS.ProcessEnv = process.env,
+  activationReleaseCapable = isMainnetActivationReleaseCapable(),
 ): FeePayerConfig {
   const apiKey = required(environment, 'FEE_PAYER_API_KEY')
   let profile: NetworkProfile
   try {
-    profile = resolveNetworkProfile(environment)
+    profile = resolveNetworkProfile(environment, activationReleaseCapable)
   } catch (error) {
     if (error instanceof NetworkProfileError) {
       throw new ConfigurationError(error.message)
@@ -62,6 +71,15 @@ export function loadConfig(
   const signerType = profile.id === 'kairos'
     ? 'local-private-key'
     : externalSignerType(environment.FEE_PAYER_MAINNET_SIGNER_TYPE)
+  const mainnetSignerBackend = profile.id === 'kaia-mainnet'
+    ? externalSignerBackend(environment.FEE_PAYER_MAINNET_SIGNER_BACKEND)
+    : null
+  const awsRegion = profile.id === 'kaia-mainnet'
+    ? awsRegionValue(environment.FEE_PAYER_AWS_REGION)
+    : null
+  const awsKmsKeyId = profile.id === 'kaia-mainnet'
+    ? safeIdentifier(environment.FEE_PAYER_AWS_KMS_KEY_ID, 'AWS KMS key identifier')
+    : null
   const feePayerAddress =
     profile.id === 'kaia-mainnet'
       ? address(environment.FEE_PAYER_KAIA_MAINNET_ADDRESS)
@@ -96,7 +114,11 @@ export function loadConfig(
 
   if (
     profile.id === 'kaia-mainnet' &&
-    environment.FEE_PAYER_KAIA_MAINNET_PRIVATE_KEY !== undefined
+    [
+      environment.FEE_PAYER_PRIVATE_KEY,
+      environment.FEE_PAYER_KAIROS_PRIVATE_KEY,
+      environment.FEE_PAYER_KAIA_MAINNET_PRIVATE_KEY,
+    ].some((value) => value !== undefined && value !== '')
   ) {
     throw new ConfigurationError(
       'Process-local Mainnet private keys are not supported',
@@ -113,6 +135,10 @@ export function loadConfig(
   const mainnetBroadcastEnabled = booleanFlag(
     environment.FEE_PAYER_MAINNET_BROADCAST_ENABLED,
   )
+  const maxGas = positiveBigInt(environment.FEE_PAYER_MAX_GAS ?? '150000', 'maximum gas')
+  const minimumReserveWei = decimalKaiaToWei(
+    environment.FEE_PAYER_MIN_RESERVE_KAIA ?? (profile.id === 'kaia-mainnet' ? '' : '0'),
+  )
 
   return {
     host: '127.0.0.1',
@@ -120,6 +146,14 @@ export function loadConfig(
     apiKey,
     localPrivateKey: localPrivateKey as Hex | null,
     signerType,
+    mainnetSignerBackend,
+    awsRegion,
+    awsKmsKeyId,
+    signerTimeoutMs: integer(
+      environment.FEE_PAYER_SIGNER_TIMEOUT_MS ?? '5000',
+      500,
+      30_000,
+    ),
     feePayerAddress,
     kairosFeePayerAddress,
     allowCrossNetworkIdentity,
@@ -129,10 +163,7 @@ export function loadConfig(
     profile,
     rpcUrl: profile.rpcUrl,
     tokenContract: profile.jpyc.contract,
-    maxGas: positiveBigInt(
-      environment.FEE_PAYER_MAX_GAS ?? '150000',
-      'maximum gas',
-    ),
+    maxGas,
     receiptTimeoutMs: integer(
       environment.FEE_PAYER_RECEIPT_TIMEOUT_MS ?? '45000',
       1000,
@@ -142,14 +173,15 @@ export function loadConfig(
       environment.FEE_PAYER_KILL_SWITCH,
       profile.id === 'kaia-mainnet',
     ),
-    minimumReserveWei: decimalKaiaToWei(
-      environment.FEE_PAYER_MIN_RESERVE_KAIA ??
-        (profile.id === 'kaia-mainnet' ? '' : '0'),
-    ),
+    minimumReserveWei,
     mainnetEnabled,
     selfHostedMainnetEnabled,
     mainnetSigningEnabled,
     mainnetBroadcastEnabled,
+    pilotPolicy: profile.id === 'kaia-mainnet' && feePayerAddress !== null
+      ? inspectMainnetPilotPolicy(environment, maxGas, minimumReserveWei, feePayerAddress)
+      : null,
+    activationReleaseCapable,
   }
 }
 
@@ -219,6 +251,33 @@ function externalSignerType(
     throw new ConfigurationError(
       'Mainnet signer type must be external',
     )
+  }
+  return value
+}
+
+function externalSignerBackend(value: string | undefined): 'aws-kms' {
+  if (value !== 'aws-kms') {
+    throw new ConfigurationError('Mainnet signer backend must be aws-kms')
+  }
+  return value
+}
+
+function awsRegionValue(value: string | undefined): string {
+  const region = safeIdentifier(value, 'AWS region')
+  if (!/^[a-z]{2}(?:-gov)?-[a-z]+-\d$/u.test(region)) {
+    throw new ConfigurationError('Invalid AWS region configuration')
+  }
+  return region
+}
+
+function safeIdentifier(value: string | undefined, label: string): string {
+  if (
+    typeof value !== 'string' ||
+    value.length < 1 ||
+    value.length > 2048 ||
+    /[\s\x00-\x1f\x7f]/u.test(value)
+  ) {
+    throw new ConfigurationError(`Invalid ${label} configuration`)
   }
   return value
 }

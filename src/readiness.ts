@@ -61,26 +61,29 @@ export async function assertNetworkReady(
 
 export interface MainnetReadinessResult {
   readonly ready: boolean
+  readonly fundingStatus: 'FUNDED' | 'NOT_FUNDED'
   readonly feePayerAddress: Address
   readonly balanceWei: bigint
   readonly balanceKaia: string
+  readonly minimumReserveWei: bigint
+  readonly minimumReserveKaia: string
   readonly latestBlock: bigint
   readonly secondaryLatestBlock: bigint | null
 }
 
 export async function checkMainnetReadiness(
   config: FeePayerConfig,
+  safeDeploymentOnly = true,
 ): Promise<MainnetReadinessResult> {
   if (
     config.networkId !== 'kaia-mainnet' ||
-    config.profile.executionEnabled ||
-    config.profile.signingEnabled ||
-    config.profile.broadcastEnabled ||
-    config.mainnetEnabled ||
-    config.selfHostedMainnetEnabled ||
-    config.mainnetSigningEnabled ||
-    config.mainnetBroadcastEnabled ||
-    !config.killSwitchActive ||
+    (safeDeploymentOnly && (
+      config.mainnetEnabled ||
+      config.selfHostedMainnetEnabled ||
+      config.mainnetSigningEnabled ||
+      config.mainnetBroadcastEnabled ||
+      !config.killSwitchActive
+    )) ||
     config.signerType !== 'external' ||
     config.feePayerAddress === null ||
     config.minimumReserveWei <= 0n
@@ -116,8 +119,7 @@ export async function checkMainnetReadiness(
     chainId !== config.profile.chainId ||
     bytecode === undefined ||
     symbol !== config.profile.jpyc.symbol ||
-    decimals !== config.profile.jpyc.decimals ||
-    balanceWei < config.minimumReserveWei
+    decimals !== config.profile.jpyc.decimals
   ) {
     throw new NetworkProfileError('Mainnet fee-payer RPC readiness failed')
   }
@@ -143,9 +145,13 @@ export async function checkMainnetReadiness(
 
   return {
     ready: true,
+    fundingStatus:
+      balanceWei >= config.minimumReserveWei ? 'FUNDED' : 'NOT_FUNDED',
     feePayerAddress: config.feePayerAddress,
     balanceWei,
     balanceKaia: formatEther(balanceWei),
+    minimumReserveWei: config.minimumReserveWei,
+    minimumReserveKaia: formatEther(config.minimumReserveWei),
     latestBlock,
     secondaryLatestBlock,
   }

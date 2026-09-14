@@ -8,6 +8,7 @@ import {
 import { TransactionPolicyError } from '../src/policy.js'
 import {
   ServicePolicyError,
+  SignerOperationError,
   SponsorshipStatusUnknownError,
 } from '../src/sponsor.js'
 import { SENDER, SENDER_RAW } from './fixtures.js'
@@ -172,11 +173,56 @@ test('kill switch response is fixed and redacts internal values', async (context
   assert.equal(response.status, 503)
   assert.deepEqual(await response.json(), {
     status: false,
-    error: 'SERVICE_UNAVAILABLE',
+    error: 'KILL_SWITCH_ACTIVE',
   })
   assert.deepEqual(diagnostics, ['KILL_SWITCH_ACTIVE'])
   assert.equal(JSON.stringify(diagnostics).includes(API_KEY), false)
   assert.equal(JSON.stringify(diagnostics).includes(SENDER_RAW), false)
+})
+
+test('live-capable server keeps sponsorship unavailable while runtime gates are closed', async (context) => {
+  let calls = 0
+  const server = createFeePayerServer({
+    apiKey: API_KEY,
+    networkId: 'kaia-mainnet',
+    feePayerAddress: SENDER,
+    sponsorshipAvailable: () => false,
+    sponsorService: {
+      sponsor: async () => {
+        calls++
+        return { hash: TX_HASH, status: 'success' }
+      },
+    },
+  })
+  const url = await listen(server)
+  context.after(() => server.close())
+
+  const response = await post(url, SENDER_RAW)
+  assert.equal(response.status, 503)
+  assert.equal(calls, 0)
+})
+
+test('returns a fixed pre-broadcast signer timeout', async (context) => {
+  const diagnostics: FeePayerDiagnosticCode[] = []
+  const server = createFeePayerServer({
+    apiKey: API_KEY,
+    networkId: 'kaia-mainnet',
+    feePayerAddress: SENDER,
+    sponsorService: {
+      sponsor: async () => { throw new SignerOperationError('SIGNER_TIMEOUT') },
+    },
+    logDiagnostic: (code) => diagnostics.push(code),
+  })
+  const url = await listen(server)
+  context.after(() => server.close())
+
+  const response = await post(url, SENDER_RAW)
+  assert.equal(response.status, 503)
+  assert.deepEqual(await response.json(), {
+    status: false,
+    error: 'SIGNER_TIMEOUT',
+  })
+  assert.deepEqual(diagnostics, ['SIGNER_TIMEOUT'])
 })
 
 async function listen(server: ReturnType<typeof createFeePayerServer>): Promise<URL> {

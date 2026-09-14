@@ -6,8 +6,8 @@ async function main(): Promise<void> {
   const config = loadConfig()
 
   const signerHealth = await createFeePayerSigner(config).health()
-  if (signerHealth.status !== 'unavailable') {
-    throw new Error('Mainnet signer must remain unavailable in Phase 8')
+  if (signerHealth.status !== 'ready') {
+    throw new Error('Mainnet external signer is not ready')
   }
 
   const report = await checkMainnetReadiness(config)
@@ -16,14 +16,21 @@ async function main(): Promise<void> {
       'network=kaia-mainnet',
       `chain_id=${config.chainId}`,
       `fee_payer_address=${report.feePayerAddress}`,
+      `balance_wei=${report.balanceWei}`,
       `balance_kaia=${report.balanceKaia}`,
+      `minimum_reserve_wei=${report.minimumReserveWei}`,
+      `minimum_reserve_kaia=${report.minimumReserveKaia}`,
+      `funding_status=${report.fundingStatus}`,
       `latest_block=${report.latestBlock}`,
       `secondary_latest_block=${report.secondaryLatestBlock ?? 'not-configured'}`,
       'kill_switch=active',
-      'signer=structurally-configured-but-unavailable',
+      `signer_type=${signerHealth.type}`,
+      `signer_key_reference=${signerHealth.metadata.keyReference}`,
+      'signer=SIGNER_READY',
+      'execution=disabled',
       'signing=disabled',
       'broadcast=disabled',
-      'readiness=ready',
+      'readiness=READ_ONLY_READY',
       '',
     ].join('\n'),
   )
