@@ -6,7 +6,7 @@
   "packageManager": "pnpm@11.13.1",
   "scripts": {
     "clean": "node scripts/clean-dist.mjs",
-    "build": "corepack pnpm clean && tsc -p tsconfig.build.json",
+    "build": "corepack pnpm clean && tsc -p tsconfig.build.json && cp mainnet-pilot-activation.json dist/mainnet-pilot-activation.json",
     "build:test": "corepack pnpm clean && tsc -p tsconfig.json",
     "prestart": "corepack pnpm build",
     "setup:kairos": "tsc -p tsconfig.tools.json && node dist/tools/setup-kairos.js",

@@ -2,6 +2,11 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { keccak256, type Address, type Hash, type Hex } from 'viem'
 import {
+  BROADCAST_CERTAINTIES,
+  isBroadcastCertainty,
+} from '../src/broadcast-certainty.js'
+import {
+  broadcastCertaintyForError,
   ServicePolicyError,
   SponsorService,
   SignerOperationError,
@@ -21,8 +26,12 @@ import {
 
 async function dependencies(options: {
   readonly recovered?: Address
+  readonly recoveryFailure?: Error
   readonly broadcastFailure?: Error
+  readonly broadcastHash?: Hash
   readonly receiptStatus?: 'success' | 'reverted'
+  readonly receiptFailure?: Error
+  readonly receiptHash?: Hash
   readonly balance?: bigint
   readonly balanceFailure?: boolean
   readonly signingFailure?: Error
@@ -51,6 +60,9 @@ async function dependencies(options: {
       },
       recoverSender: async () => {
         calls.recover++
+        if (options.recoveryFailure !== undefined) {
+          throw options.recoveryFailure
+        }
         return options.recovered ?? SENDER
       },
       broadcast: async () => {
@@ -58,12 +70,13 @@ async function dependencies(options: {
         if (options.broadcastFailure !== undefined) {
           throw options.broadcastFailure
         }
-        return expectedHash
+        return options.broadcastHash ?? expectedHash
       },
       waitForReceipt: async () => {
         calls.receipt++
+        if (options.receiptFailure !== undefined) throw options.receiptFailure
         return {
-          transactionHash: expectedHash,
+          transactionHash: options.receiptHash ?? expectedHash,
           status: options.receiptStatus ?? 'success',
         }
       },
@@ -126,7 +139,11 @@ test('signs, recovers, broadcasts once, and reuses a successful result', async (
   const first = await service.sponsor(SENDER_RAW)
   const second = await service.sponsor(SENDER_RAW)
 
-  assert.deepEqual(first, { hash: fixture.expectedHash, status: 'success' })
+  assert.deepEqual(first, {
+    hash: fixture.expectedHash,
+    status: 'success',
+    broadcastCertainty: 'submitted',
+  })
   assert.deepEqual(second, first)
   assert.deepEqual(fixture.calls, {
     balance: 1,
@@ -150,7 +167,78 @@ test('never broadcasts when recovered sender does not match', async () => {
     fixture.value,
   )
 
-  await assert.rejects(() => service.sponsor(SENDER_RAW), TransactionPolicyError)
+  await assert.rejects(() => service.sponsor(SENDER_RAW), (error: unknown) => {
+    assert.ok(error instanceof TransactionPolicyError)
+    assert.equal(
+      broadcastCertaintyForError(error),
+      'definitely_not_broadcast',
+    )
+    return true
+  })
+  assert.equal(fixture.calls.broadcast, 0)
+})
+
+test('broadcast certainty values are an exact closed enum', () => {
+  assert.deepEqual(BROADCAST_CERTAINTIES, [
+    'definitely_not_broadcast',
+    'broadcast_possible',
+    'submitted',
+  ])
+  assert.equal(isBroadcastCertainty('definitely_not_broadcast'), true)
+  assert.equal(isBroadcastCertainty('broadcast_possible'), true)
+  assert.equal(isBroadcastCertainty('submitted'), true)
+  assert.equal(isBroadcastCertainty('unknown'), false)
+  assert.equal(
+    broadcastCertaintyForError({
+      broadcastCertainty: 'definitely_not_broadcast',
+    }),
+    'broadcast_possible',
+  )
+})
+
+test('sender transaction policy rejection is definitely not broadcast', async () => {
+  const fixture = await dependencies()
+  const service = new SponsorService({
+    tokenContract: TOKEN,
+    maxGas: 150000n,
+    chainId: 1001,
+    killSwitchActive: false,
+    minimumReserveWei: 0n,
+  }, fixture.value)
+
+  await assert.rejects(() => service.sponsor('0x00'), (error: unknown) => {
+    assert.ok(error instanceof TransactionPolicyError)
+    assert.equal(
+      broadcastCertaintyForError(error),
+      'definitely_not_broadcast',
+    )
+    return true
+  })
+  assert.equal(fixture.calls.sign, 0)
+  assert.equal(fixture.calls.broadcast, 0)
+})
+
+test('sender recovery failure is definitely not broadcast and releases its claim', async () => {
+  const fixture = await dependencies({
+    recoveryFailure: new Error('private recovery RPC'),
+  })
+  const service = new SponsorService({
+    tokenContract: TOKEN,
+    maxGas: 150000n,
+    chainId: 1001,
+    killSwitchActive: false,
+    minimumReserveWei: 0n,
+  }, fixture.value)
+
+  for (const expectedRecoverCalls of [1, 2]) {
+    await assert.rejects(() => service.sponsor(SENDER_RAW), (error: unknown) => {
+      assert.ok(error instanceof SponsorshipStatusUnknownError)
+      assert.equal(error.stage, 'sender-recovery')
+      assert.equal(error.broadcastCertainty, 'definitely_not_broadcast')
+      return true
+    })
+    assert.equal(fixture.calls.recover, expectedRecoverCalls)
+  }
   assert.equal(fixture.calls.broadcast, 0)
 })
 
@@ -175,15 +263,89 @@ for (const [caseName, failure] of [
     await assert.rejects(() => service.sponsor(SENDER_RAW), (error: unknown) => {
       assert.ok(error instanceof SponsorshipStatusUnknownError)
       assert.equal(error.stage, 'broadcast')
+      assert.equal(error.broadcastCertainty, 'broadcast_possible')
       return true
     })
     await assert.rejects(
       () => service.sponsor(SENDER_RAW),
       SponsorshipStatusUnknownError,
     )
+    assert.equal(fixture.calls.sign, 1)
     assert.equal(fixture.calls.broadcast, 1)
   })
 }
+
+test('broadcast hash mismatch is broadcast possible and cannot be retried', async () => {
+  const fixture = await dependencies({
+    broadcastHash: `0x${'cd'.repeat(32)}`,
+  })
+  const service = new SponsorService({
+    tokenContract: TOKEN,
+    maxGas: 150000n,
+    chainId: 1001,
+    killSwitchActive: false,
+    minimumReserveWei: 0n,
+  }, fixture.value)
+
+  for (const expectedStage of ['broadcast-hash', 'broadcast-hash'] as const) {
+    await assert.rejects(() => service.sponsor(SENDER_RAW), (error: unknown) => {
+      assert.ok(error instanceof SponsorshipStatusUnknownError)
+      assert.equal(error.stage, expectedStage)
+      assert.equal(error.broadcastCertainty, 'broadcast_possible')
+      return true
+    })
+  }
+  assert.equal(fixture.calls.sign, 1)
+  assert.equal(fixture.calls.broadcast, 1)
+})
+
+test('receipt timeout after accepted hash is submitted and cannot be retried', async () => {
+  const fixture = await dependencies({ receiptFailure: new Error('timeout') })
+  const service = new SponsorService({
+    tokenContract: TOKEN,
+    maxGas: 150000n,
+    chainId: 1001,
+    killSwitchActive: false,
+    minimumReserveWei: 0n,
+  }, fixture.value)
+
+  for (const expectedStage of ['receipt', 'receipt'] as const) {
+    await assert.rejects(() => service.sponsor(SENDER_RAW), (error: unknown) => {
+      assert.ok(error instanceof SponsorshipStatusUnknownError)
+      assert.equal(error.stage, expectedStage)
+      assert.equal(error.broadcastCertainty, 'submitted')
+      return true
+    })
+  }
+  assert.equal(fixture.calls.sign, 1)
+  assert.equal(fixture.calls.broadcast, 1)
+  assert.equal(fixture.calls.receipt, 1)
+})
+
+test('receipt hash mismatch remains submitted and cannot be retried', async () => {
+  const fixture = await dependencies({
+    receiptHash: `0x${'ef'.repeat(32)}`,
+  })
+  const service = new SponsorService({
+    tokenContract: TOKEN,
+    maxGas: 150000n,
+    chainId: 1001,
+    killSwitchActive: false,
+    minimumReserveWei: 0n,
+  }, fixture.value)
+
+  for (const expectedStage of ['receipt-hash', 'receipt-hash'] as const) {
+    await assert.rejects(() => service.sponsor(SENDER_RAW), (error: unknown) => {
+      assert.ok(error instanceof SponsorshipStatusUnknownError)
+      assert.equal(error.stage, expectedStage)
+      assert.equal(error.broadcastCertainty, 'submitted')
+      return true
+    })
+  }
+  assert.equal(fixture.calls.sign, 1)
+  assert.equal(fixture.calls.broadcast, 1)
+  assert.equal(fixture.calls.receipt, 1)
+})
 
 test('kill switch and insufficient reserve block signing and broadcast', async () => {
   for (const [killSwitchActive, balance] of [
@@ -259,6 +421,7 @@ for (const [name, failure, code] of [
     await assert.rejects(() => service.sponsor(SENDER_RAW), (error: unknown) => {
       assert.ok(error instanceof SignerOperationError)
       assert.equal(error.code, code)
+      assert.equal(error.broadcastCertainty, 'definitely_not_broadcast')
       return true
     })
     assert.equal(fixture.calls.broadcast, 0)
@@ -278,8 +441,15 @@ test('a confirmed revert is retained and cannot be broadcast again', async () =>
     fixture.value,
   )
 
-  assert.equal((await service.sponsor(SENDER_RAW)).status, 'reverted')
-  assert.equal((await service.sponsor(SENDER_RAW)).status, 'reverted')
+  assert.deepEqual(await service.sponsor(SENDER_RAW), {
+    hash: fixture.expectedHash,
+    status: 'reverted',
+    broadcastCertainty: 'submitted',
+  })
+  assert.equal(
+    (await service.sponsor(SENDER_RAW)).broadcastCertainty,
+    'submitted',
+  )
   assert.equal(fixture.calls.broadcast, 1)
 })
 
@@ -447,8 +617,12 @@ test('late kill switch checks block before KMS Sign and immediately before broad
     }, fixture.value)
     await assert.rejects(
       () => service.sponsor(SENDER_RAW, MAINNET_CONTEXT),
-      (error: unknown) => error instanceof ServicePolicyError
-        && error.code === 'KILL_SWITCH_ACTIVE',
+      (error: unknown) => {
+        assert.ok(error instanceof ServicePolicyError)
+        assert.equal(error.code, 'KILL_SWITCH_ACTIVE')
+        assert.equal(error.broadcastCertainty, 'definitely_not_broadcast')
+        return true
+      },
     )
     assert.equal(fixture.calls.broadcast, 0)
     assert.equal(fixture.calls.sign, stage === 'signing' ? 0 : 1)
@@ -486,8 +660,12 @@ test('expiry reached during balance or KMS work blocks the next irreversible ste
         paymentId: 1,
         expiresAt: new Date(2_000).toISOString(),
       }),
-      (error: unknown) => error instanceof ServicePolicyError
-        && error.code === 'PAYMENT_EXPIRED',
+      (error: unknown) => {
+        assert.ok(error instanceof ServicePolicyError)
+        assert.equal(error.code, 'PAYMENT_EXPIRED')
+        assert.equal(error.broadcastCertainty, 'definitely_not_broadcast')
+        return true
+      },
     )
     assert.equal(fixture.calls.sign, stage === 'before-sign' ? 0 : 1)
     assert.equal(fixture.calls.broadcast, 0)

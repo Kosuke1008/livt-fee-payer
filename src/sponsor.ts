@@ -12,6 +12,10 @@ import {
 } from 'viem'
 import type { FeePayerConfig } from './config.js'
 import {
+  isBroadcastCertainty,
+  type BroadcastCertainty,
+} from './broadcast-certainty.js'
+import {
   assertFeePayerExecutionAllowed,
   NetworkExecutionDisabledError,
 } from './network-profiles.js'
@@ -47,6 +51,7 @@ export interface SponsorDependencies {
 export interface SponsorshipResult {
   readonly hash: Hash
   readonly status: 'success' | 'reverted'
+  readonly broadcastCertainty: 'submitted'
 }
 
 export type SponsorshipFailureStage =
@@ -60,16 +65,21 @@ export type SponsorshipFailureStage =
 export class SponsorshipStatusUnknownError extends Error {
   override readonly name = 'SponsorshipStatusUnknownError'
 
+  readonly broadcastCertainty: BroadcastCertainty
+
   constructor(
     readonly stage: SponsorshipFailureStage,
     options?: ErrorOptions,
   ) {
     super('Fee sponsorship status is unknown', options)
+    this.broadcastCertainty = certaintyForFailureStage(stage)
   }
 }
 
 export class SignerOperationError extends Error {
   override readonly name = 'SignerOperationError'
+
+  readonly broadcastCertainty = 'definitely_not_broadcast' as const
 
   constructor(readonly code: ExternalSignerErrorCode) {
     super('Fee-payer signing failed before broadcast')
@@ -87,6 +97,8 @@ export type ServicePolicyCode =
 
 export class ServicePolicyError extends Error {
   override readonly name = 'ServicePolicyError'
+
+  readonly broadcastCertainty = 'definitely_not_broadcast' as const
 
   constructor(readonly code: ServicePolicyCode) {
     super('Fee sponsorship is unavailable')
@@ -157,7 +169,7 @@ export class SponsorService {
       const result = await attempt
       return result
     } catch (error) {
-      if (error instanceof TransactionPolicyError) {
+      if (broadcastCertaintyForError(error) === 'definitely_not_broadcast') {
         this.attempts.delete(fingerprint)
       }
       throw error
@@ -255,7 +267,11 @@ export class SponsorService {
       throw new SponsorshipStatusUnknownError('receipt-hash')
     }
 
-    return { hash: expectedHash, status: receipt.status }
+    return {
+      hash: expectedHash,
+      status: receipt.status,
+      broadcastCertainty: 'submitted',
+    }
   }
 
   private assertNotExpired(expiresAt: number | null): void {
@@ -265,6 +281,38 @@ export class SponsorService {
     }
   }
 
+}
+
+export function broadcastCertaintyForError(
+  error: unknown,
+): BroadcastCertainty {
+  if (error instanceof TransactionPolicyError
+    || error instanceof SignerOperationError
+    || error instanceof ServicePolicyError) {
+    return 'definitely_not_broadcast'
+  }
+  if (error instanceof SponsorshipStatusUnknownError) {
+    return isBroadcastCertainty(error.broadcastCertainty)
+      ? error.broadcastCertainty
+      : 'broadcast_possible'
+  }
+  return 'broadcast_possible'
+}
+
+function certaintyForFailureStage(
+  stage: SponsorshipFailureStage,
+): BroadcastCertainty {
+  switch (stage) {
+    case 'signing':
+    case 'sender-recovery':
+      return 'definitely_not_broadcast'
+    case 'broadcast':
+    case 'broadcast-hash':
+      return 'broadcast_possible'
+    case 'receipt':
+    case 'receipt-hash':
+      return 'submitted'
+  }
 }
 
 export function createSponsorDependencies(

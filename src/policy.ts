@@ -85,7 +85,7 @@ export function validateSenderTransaction(
   const data = transaction.data
   const signatures = transaction.txSignatures
 
-  if (transaction.type !== TxType.FeeDelegatedSmartContractExecution) {
+  if (!isFeeDelegatedSmartContractExecution(transaction.type)) {
     throw new TransactionPolicyError('WRONG_TRANSACTION_TYPE')
   }
   if (
@@ -201,17 +201,34 @@ function address(value: unknown): Address {
 }
 
 function quantity(value: unknown): bigint {
+  if (value === '0x') {
+    return 0n
+  }
+
   if (
     (typeof value !== 'string' && typeof value !== 'number') ||
     (typeof value === 'number' && !Number.isSafeInteger(value))
   ) {
     throw new TransactionPolicyError('INVALID_QUANTITY')
   }
+
   try {
     return BigInt(value)
   } catch {
     throw new TransactionPolicyError('INVALID_QUANTITY')
   }
+}
+
+function isFeeDelegatedSmartContractExecution(value: unknown): boolean {
+  if (value === TxType.FeeDelegatedSmartContractExecution) {
+    return true
+  }
+
+  return (
+    typeof value === 'string' &&
+    value.toLowerCase() ===
+      `0x${TxType.FeeDelegatedSmartContractExecution.toString(16)}`
+  )
 }
 
 function getChainId(signatures: unknown[]): number {

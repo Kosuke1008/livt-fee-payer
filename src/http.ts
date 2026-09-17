@@ -1,8 +1,13 @@
 import { timingSafeEqual } from 'node:crypto'
 import { createServer, type IncomingMessage, type Server } from 'node:http'
 import type { Address } from 'viem'
+import {
+  BROADCAST_PROTOCOL_VERSION,
+  type BroadcastCertainty,
+} from './broadcast-certainty.js'
 import type { NetworkId } from './network-profiles.js'
 import {
+  broadcastCertaintyForError,
   ServicePolicyError,
   SignerOperationError,
   SponsorshipStatusUnknownError,
@@ -75,20 +80,25 @@ export function createFeePayerServer(options: {
     }
 
     if (request.method !== 'POST' || request.url !== '/api/signAsFeePayer') {
-      respond(response, 404, { status: false, error: 'NOT_FOUND' })
+      respondError(response, 404, 'NOT_FOUND', 'definitely_not_broadcast')
       return
     }
     if (!authorized(request, options.apiKey)) {
-      respond(response, 401, { status: false, error: 'BAD_REQUEST' })
+      respondError(response, 401, 'BAD_REQUEST', 'definitely_not_broadcast')
       return
     }
     if (options.sponsorshipAvailable?.() === false) {
       logDiagnostic('EXECUTION_DISABLED')
-      respond(response, 503, { status: false, error: 'SERVICE_UNAVAILABLE' })
+      respondError(
+        response,
+        503,
+        'SERVICE_UNAVAILABLE',
+        'definitely_not_broadcast',
+      )
       return
     }
     if (!request.headers['content-type']?.startsWith('application/json')) {
-      respond(response, 415, { status: false, error: 'BAD_REQUEST' })
+      respondError(response, 415, 'BAD_REQUEST', 'definitely_not_broadcast')
       return
     }
 
@@ -100,11 +110,17 @@ export function createFeePayerServer(options: {
         expiresAt: values.expiresAt,
       })
 
+      if (result.broadcastCertainty !== 'submitted') {
+        throw new Error('Invalid sponsorship result certainty')
+      }
+
       if (result.status === 'reverted') logDiagnostic('REVERTED')
 
       respond(response, 200, {
         status: result.status === 'success',
         ...(result.status === 'reverted' ? { error: 'REVERTED' } : {}),
+        protocol_version: BROADCAST_PROTOCOL_VERSION,
+        broadcast_certainty: result.broadcastCertainty,
         data: {
           status: result.status === 'success' ? '0x1' : '0x0',
           hash: result.hash,
@@ -114,37 +130,54 @@ export function createFeePayerServer(options: {
     } catch (error) {
       if (error instanceof TransactionPolicyError) {
         logDiagnostic(`POLICY_REJECTED:${error.code}`)
-        respond(response, 400, { status: false, error: 'BAD_REQUEST' })
+        respondError(
+          response,
+          400,
+          'BAD_REQUEST',
+          broadcastCertaintyForError(error),
+        )
         return
       }
       if (error instanceof SyntaxError) {
         logDiagnostic('MALFORMED_REQUEST')
-        respond(response, 400, { status: false, error: 'BAD_REQUEST' })
+        respondError(response, 400, 'BAD_REQUEST', 'definitely_not_broadcast')
         return
       }
       if (error instanceof SponsorshipStatusUnknownError) {
         logDiagnostic(diagnosticCode(error))
-        respond(response, 503, { status: false, error: 'INTERNAL_ERROR' })
+        respondError(
+          response,
+          503,
+          'INTERNAL_ERROR',
+          broadcastCertaintyForError(error),
+        )
         return
       }
       if (error instanceof SignerOperationError) {
         logDiagnostic(error.code)
-        respond(response, 503, { status: false, error: error.code })
+        respondError(
+          response,
+          503,
+          error.code,
+          broadcastCertaintyForError(error),
+        )
         return
       }
       if (error instanceof ServicePolicyError) {
         logDiagnostic(error.code)
-        respond(response, 503, {
-          status: false,
-          error: error.code === 'KILL_SWITCH_ACTIVE'
+        respondError(
+          response,
+          503,
+          error.code === 'KILL_SWITCH_ACTIVE'
             || error.code === 'PAYMENT_EXPIRED'
             ? error.code
             : 'SERVICE_UNAVAILABLE',
-        })
+          broadcastCertaintyForError(error),
+        )
         return
       }
       logDiagnostic('INTERNAL_ERROR')
-      respond(response, 500, { status: false, error: 'INTERNAL_ERROR' })
+      respondError(response, 500, 'INTERNAL_ERROR', 'broadcast_possible')
     }
   })
 }
@@ -219,4 +252,18 @@ function respond(
 ): void {
   response.writeHead(status)
   response.end(JSON.stringify(body))
+}
+
+function respondError(
+  response: import('node:http').ServerResponse,
+  status: number,
+  error: string,
+  broadcastCertainty: BroadcastCertainty,
+): void {
+  respond(response, status, {
+    status: false,
+    error,
+    protocol_version: BROADCAST_PROTOCOL_VERSION,
+    broadcast_certainty: broadcastCertainty,
+  })
 }
