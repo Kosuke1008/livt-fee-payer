@@ -271,9 +271,10 @@ corepack pnpm setup:kairos
 - `MAINNET_PILOT_MAX_FEE_PAYER_BALANCE_KAIA`
 - `MAINNET_STAGING_MERCHANT_ADDRESS`
 - `MAINNET_STAGING_APPROVED_SENDER_ADDRESSES`
-- `MAINNET_PILOT_PAYMENT_ID`
+- `MAINNET_PAYMENT_AUTHORIZATION_KEY`
 
 AWS static credentialやMainnet private keyをこれらへ追加しないでください。
+Payment認可鍵はLaravelとFee Payerだけに同じ32-byte hex値をsecret manager経由で配布し、Wallet、ログ、health responseへ値を出しません。
 
 ## Tests
 
@@ -289,9 +290,9 @@ corepack pnpm build
 
 ## Known limitations
 
-- replay claimは現在process内のMapであり、再起動をまたぐ永続ledgerではない
-- Laravel側attempt ledgerとのcertainty連携・自動reconciliationは未完了
-- Mainnet pilotは単一attempt、単一Payment、単一senderのpolicy
+- replay claimはPayment単位とsender transaction fingerprint単位だが、現在はprocess内のみ
+- Laravel側attempt ledgerへcertaintyは永続化するが、Payment確定後の自動reconciliationは未完了
+- Laravelのrate/budget上限は複数Payment対応後も保守的な値で運用する必要がある
 - production monitoring、alerting、HA構成は未完成
 - key rotation手順はoperator runbookのさらなる整備が必要
 
@@ -299,7 +300,7 @@ corepack pnpm build
 
 - Laravelの永続replay claimとの統合
 - receipt観測とPayment confirmed後のattempt state追従
-- 複数Payment向けの安全なidempotency設計
+- process再起動をまたぐFee Payer replay claim
 - production monitoring / alerting / audit export
 - KMS key rotationと障害復旧訓練
 - rate limit、gas budget、funding policyの継続改善
