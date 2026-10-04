@@ -53,6 +53,7 @@ test('loads Mainnet metadata without accepting a process private key', async () 
   const config = loadConfig({
     BLOCKCHAIN_NETWORK: 'kaia-mainnet',
     FEE_PAYER_API_KEY: 'a'.repeat(64),
+    MAINNET_PAYMENT_AUTHORIZATION_KEY: 'c'.repeat(64),
     FEE_PAYER_KAIA_MAINNET_RPC_URL: 'https://mainnet.example.test',
     FEE_PAYER_KAIA_MAINNET_ADDRESS: '0x1111111111111111111111111111111111111111',
     FEE_PAYER_KAIROS_ADDRESS: '0x2222222222222222222222222222222222222222',
@@ -67,6 +68,7 @@ test('loads Mainnet metadata without accepting a process private key', async () 
   assert.equal(config.networkId, 'kaia-mainnet')
   assert.equal(config.chainId, 8217)
   assert.equal(config.localPrivateKey, null)
+  assert.equal(config.paymentAuthorizationKey, 'c'.repeat(64))
   assert.equal(config.profile.executionEnabled, false)
   assert.equal(createFeePayerSigner(config).type, 'aws-kms')
 })
@@ -75,6 +77,7 @@ test('rejects incomplete Mainnet external signer configuration', () => {
   const base = {
     BLOCKCHAIN_NETWORK: 'kaia-mainnet',
     FEE_PAYER_API_KEY: 'a'.repeat(64),
+    MAINNET_PAYMENT_AUTHORIZATION_KEY: 'c'.repeat(64),
     FEE_PAYER_KAIA_MAINNET_RPC_URL: 'https://mainnet.example.test',
     FEE_PAYER_KAIA_MAINNET_ADDRESS: '0x1111111111111111111111111111111111111111',
     FEE_PAYER_KAIROS_ADDRESS: '0x2222222222222222222222222222222222222222',
@@ -93,6 +96,7 @@ test('rejects every process-local key variable under Mainnet', () => {
   const base = {
     BLOCKCHAIN_NETWORK: 'kaia-mainnet',
     FEE_PAYER_API_KEY: 'a'.repeat(64),
+    MAINNET_PAYMENT_AUTHORIZATION_KEY: 'c'.repeat(64),
     FEE_PAYER_KAIA_MAINNET_RPC_URL: 'https://mainnet.example.test',
     FEE_PAYER_KAIA_MAINNET_ADDRESS: '0x1111111111111111111111111111111111111111',
     FEE_PAYER_KAIROS_ADDRESS: '0x2222222222222222222222222222222222222222',

@@ -21,6 +21,7 @@ const CURVE_ORDER =
 const mainnetEnvironment = {
   BLOCKCHAIN_NETWORK: 'kaia-mainnet',
   FEE_PAYER_API_KEY: 'a'.repeat(64),
+  MAINNET_PAYMENT_AUTHORIZATION_KEY: 'c'.repeat(64),
   FEE_PAYER_KAIA_MAINNET_RPC_URL: 'https://mainnet.example.test',
   FEE_PAYER_KAIA_MAINNET_ADDRESS: account.address,
   FEE_PAYER_KAIROS_ADDRESS: '0x2222222222222222222222222222222222222222',

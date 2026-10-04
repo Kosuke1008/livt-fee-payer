@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { createHmac } from 'node:crypto'
 import test from 'node:test'
 import { keccak256, type Address, type Hash, type Hex } from 'viem'
 import {
@@ -113,14 +114,35 @@ function mainnetPilotPolicy(
     maximum_balance_wei: '20000000000000000',
     merchant_address: '0x70997970c51812dc3a010c7d01b50e0d17dc79c8',
     sender_address: SENDER.toLowerCase(),
-    pilot_payment_id: '1',
+    authorization_key_id: 'sha256:c2f480d4dda9f452',
+    authorization_mode: 'hmac-sha256-v1',
     ...overrides,
   }
+}
+
+const PAYMENT_AUTHORIZATION_KEY = 'c'.repeat(64)
+
+function paymentAuthorization(
+  raw: Hex,
+  paymentId: number,
+  expiresAt: string,
+): string {
+  return createHmac(
+    'sha256',
+    Buffer.from(PAYMENT_AUTHORIZATION_KEY, 'hex'),
+  ).update(
+    `livt-mainnet-payment-v1\n${paymentId}\n${expiresAt}\n${keccak256(raw).toLowerCase()}`,
+  ).digest('hex')
 }
 
 const MAINNET_CONTEXT = {
   paymentId: 1,
   expiresAt: '2099-01-01T00:00:00Z',
+  paymentAuthorization: paymentAuthorization(
+    SENDER_RAW,
+    1,
+    '2099-01-01T00:00:00Z',
+  ),
 } as const
 
 test('signs, recovers, broadcasts once, and reuses a successful result', async () => {
@@ -470,6 +492,7 @@ test('Mainnet pilot requires exact fee plus reserve before signing', async () =>
         maxGas: 150000n,
         chainId: 1001,
         networkId: 'kaia-mainnet',
+        paymentAuthorizationKey: PAYMENT_AUTHORIZATION_KEY,
         killSwitchActive: false,
         minimumReserveWei: reserve,
         pilotPolicy: mainnetPilotPolicy(),
@@ -507,6 +530,7 @@ for (const [name, policy, balance] of [
         maxGas: 150000n,
         chainId: 1001,
         networkId: 'kaia-mainnet',
+        paymentAuthorizationKey: PAYMENT_AUTHORIZATION_KEY,
         killSwitchActive: false,
         minimumReserveWei: 10_000_000_000_000_000n,
         pilotPolicy: policy,
@@ -535,6 +559,7 @@ test('Mainnet pilot retains one ambiguous attempt and rejects another fingerprin
       maxGas: 150000n,
       chainId: 1001,
       networkId: 'kaia-mainnet',
+      paymentAuthorizationKey: PAYMENT_AUTHORIZATION_KEY,
       killSwitchActive: false,
       minimumReserveWei: 10_000_000_000_000_000n,
       pilotPolicy: mainnetPilotPolicy(),
@@ -544,7 +569,14 @@ test('Mainnet pilot retains one ambiguous attempt and rejects another fingerprin
 
   await assert.rejects(() => service.sponsor(SENDER_RAW, MAINNET_CONTEXT), SponsorshipStatusUnknownError)
   const changedSignature = `${SENDER_RAW.slice(0, -1)}${SENDER_RAW.endsWith('0') ? '1' : '0'}` as Hex
-  await assert.rejects(() => service.sponsor(changedSignature, MAINNET_CONTEXT), (error: unknown) => {
+  await assert.rejects(() => service.sponsor(changedSignature, {
+    ...MAINNET_CONTEXT,
+    paymentAuthorization: paymentAuthorization(
+      changedSignature,
+      MAINNET_CONTEXT.paymentId,
+      MAINNET_CONTEXT.expiresAt,
+    ),
+  }), (error: unknown) => {
     assert.ok(error instanceof ServicePolicyError)
     assert.equal(error.code, 'ATTEMPT_LEDGER_FULL')
     return true
@@ -559,6 +591,7 @@ test('Mainnet pilot rejects a second identical HTTP-level attempt', async () => 
     maxGas: 150000n,
     chainId: 1001,
     networkId: 'kaia-mainnet',
+    paymentAuthorizationKey: PAYMENT_AUTHORIZATION_KEY,
     killSwitchActive: false,
     minimumReserveWei: 10_000_000_000_000_000n,
     pilotPolicy: mainnetPilotPolicy(),
@@ -573,6 +606,88 @@ test('Mainnet pilot rejects a second identical HTTP-level attempt', async () => 
   assert.equal(fixture.calls.broadcast, 1)
 })
 
+test('Mainnet rejects the same sender transaction for a different Payment', async () => {
+  const fixture = await dependencies({ balance: 15_000_000_000_000_000n })
+  const service = new SponsorService({
+    tokenContract: TOKEN,
+    maxGas: 150000n,
+    chainId: 1001,
+    networkId: 'kaia-mainnet',
+    paymentAuthorizationKey: PAYMENT_AUTHORIZATION_KEY,
+    killSwitchActive: false,
+    minimumReserveWei: 10_000_000_000_000_000n,
+    pilotPolicy: mainnetPilotPolicy({
+      max_attempts_per_user: '2',
+      max_attempts_per_store: '2',
+      max_attempts_per_sender: '2',
+      max_attempts_global: '2',
+      daily_transaction_limit: '2',
+    }),
+  }, fixture.value)
+
+  await service.sponsor(SENDER_RAW, MAINNET_CONTEXT)
+  await assert.rejects(
+    () => service.sponsor(SENDER_RAW, {
+      paymentId: 2,
+      expiresAt: MAINNET_CONTEXT.expiresAt,
+      paymentAuthorization: paymentAuthorization(
+        SENDER_RAW,
+        2,
+        MAINNET_CONTEXT.expiresAt,
+      ),
+    }),
+    (error: unknown) => error instanceof ServicePolicyError
+      && error.code === 'ATTEMPT_LEDGER_FULL',
+  )
+  assert.equal(fixture.calls.broadcast, 1)
+})
+
+test('Mainnet accepts one independently authorized transaction for each Payment', async () => {
+  const changedSignature = `${SENDER_RAW.slice(0, -1)}${SENDER_RAW.endsWith('0') ? '1' : '0'}` as Hex
+  let broadcasts = 0
+  const base = await feePayerFixture()
+  const dependencies: SponsorDependencies = {
+    feePayerAddress: base.address,
+    signAsFeePayer: async (raw) => (await feePayerFixture(raw)).fullRaw,
+    recoverSender: async () => SENDER,
+    broadcast: async (raw) => {
+      broadcasts++
+      return keccak256(raw)
+    },
+    waitForReceipt: async (hash) => ({ transactionHash: hash, status: 'success' }),
+    getFeePayerBalance: async () => 15_000_000_000_000_000n,
+  }
+  const service = new SponsorService({
+    tokenContract: TOKEN,
+    maxGas: 150000n,
+    chainId: 1001,
+    networkId: 'kaia-mainnet',
+    paymentAuthorizationKey: PAYMENT_AUTHORIZATION_KEY,
+    killSwitchActive: false,
+    minimumReserveWei: 10_000_000_000_000_000n,
+    pilotPolicy: mainnetPilotPolicy({
+      max_attempts_per_user: '2',
+      max_attempts_per_store: '2',
+      max_attempts_per_sender: '2',
+      max_attempts_global: '2',
+      daily_transaction_limit: '2',
+    }),
+  }, dependencies)
+  const secondContext = {
+    paymentId: 2,
+    expiresAt: MAINNET_CONTEXT.expiresAt,
+    paymentAuthorization: paymentAuthorization(
+      changedSignature,
+      2,
+      MAINNET_CONTEXT.expiresAt,
+    ),
+  }
+
+  assert.equal((await service.sponsor(SENDER_RAW, MAINNET_CONTEXT)).status, 'success')
+  assert.equal((await service.sponsor(changedSignature, secondContext)).status, 'success')
+  assert.equal(broadcasts, 2)
+})
+
 test('Mainnet pilot requires exact unexpired Payment context before signing', async () => {
   for (const context of [
     undefined,
@@ -585,11 +700,40 @@ test('Mainnet pilot requires exact unexpired Payment context before signing', as
       maxGas: 150000n,
       chainId: 1001,
       networkId: 'kaia-mainnet',
+      paymentAuthorizationKey: PAYMENT_AUTHORIZATION_KEY,
       killSwitchActive: false,
       minimumReserveWei: 10_000_000_000_000_000n,
       pilotPolicy: mainnetPilotPolicy(),
     }, fixture.value)
     await assert.rejects(() => service.sponsor(SENDER_RAW, context), ServicePolicyError)
+    assert.equal(fixture.calls.sign, 0)
+    assert.equal(fixture.calls.broadcast, 0)
+  }
+})
+
+test('Mainnet rejects missing or tampered Payment authorization before signing', async () => {
+  for (const context of [
+    { ...MAINNET_CONTEXT, paymentAuthorization: undefined },
+    { ...MAINNET_CONTEXT, paymentAuthorization: '0'.repeat(64) },
+    { ...MAINNET_CONTEXT, expiresAt: '2098-01-01T00:00:00Z' },
+  ]) {
+    const fixture = await dependencies({ balance: 15_000_000_000_000_000n })
+    const service = new SponsorService({
+      tokenContract: TOKEN,
+      maxGas: 150000n,
+      chainId: 1001,
+      networkId: 'kaia-mainnet',
+      paymentAuthorizationKey: PAYMENT_AUTHORIZATION_KEY,
+      killSwitchActive: false,
+      minimumReserveWei: 10_000_000_000_000_000n,
+      pilotPolicy: mainnetPilotPolicy(),
+    }, fixture.value)
+
+    await assert.rejects(
+      () => service.sponsor(SENDER_RAW, context),
+      (error: unknown) => error instanceof ServicePolicyError
+        && error.code === 'PAYMENT_AUTHORIZATION_INVALID',
+    )
     assert.equal(fixture.calls.sign, 0)
     assert.equal(fixture.calls.broadcast, 0)
   }
@@ -611,6 +755,7 @@ test('late kill switch checks block before KMS Sign and immediately before broad
       maxGas: 150000n,
       chainId: 1001,
       networkId: 'kaia-mainnet',
+      paymentAuthorizationKey: PAYMENT_AUTHORIZATION_KEY,
       killSwitchActive: false,
       minimumReserveWei: 10_000_000_000_000_000n,
       pilotPolicy: mainnetPilotPolicy(),
@@ -638,6 +783,7 @@ test('expiry reached during balance or KMS work blocks the next irreversible ste
       maxGas: 150000n,
       chainId: 1001,
       networkId: 'kaia-mainnet',
+      paymentAuthorizationKey: PAYMENT_AUTHORIZATION_KEY,
       killSwitchActive: false,
       minimumReserveWei: 10_000_000_000_000_000n,
       pilotPolicy: mainnetPilotPolicy(),
@@ -656,10 +802,14 @@ test('expiry reached during balance or KMS work blocks the next irreversible ste
     }, () => currentTime)
 
     await assert.rejects(
-      () => service.sponsor(SENDER_RAW, {
-        paymentId: 1,
-        expiresAt: new Date(2_000).toISOString(),
-      }),
+      () => {
+        const expiresAt = new Date(2_000).toISOString()
+        return service.sponsor(SENDER_RAW, {
+          paymentId: 1,
+          expiresAt,
+          paymentAuthorization: paymentAuthorization(SENDER_RAW, 1, expiresAt),
+        })
+      },
       (error: unknown) => {
         assert.ok(error instanceof ServicePolicyError)
         assert.equal(error.code, 'PAYMENT_EXPIRED')

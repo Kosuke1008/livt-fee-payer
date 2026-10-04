@@ -45,6 +45,7 @@ export type FeePayerDiagnosticCode =
   | 'PILOT_POLICY_NOT_READY'
   | 'ATTEMPT_LEDGER_FULL'
   | 'PAYMENT_EXPIRED'
+  | 'PAYMENT_AUTHORIZATION_INVALID'
 
 export function createFeePayerServer(options: {
   readonly apiKey: string
@@ -108,6 +109,7 @@ export function createFeePayerServer(options: {
       const result = await options.sponsorService.sponsor(values.raw, {
         paymentId: values.paymentId,
         expiresAt: values.expiresAt,
+        paymentAuthorization: values.paymentAuthorization,
       })
 
       if (result.broadcastCertainty !== 'submitted') {
@@ -231,9 +233,15 @@ function bodyValue(body: unknown): {
   readonly raw: unknown
   readonly paymentId: unknown
   readonly expiresAt: unknown
+  readonly paymentAuthorization: unknown
 } {
   if (typeof body !== 'object' || body === null) {
-    return { raw: undefined, paymentId: undefined, expiresAt: undefined }
+    return {
+      raw: undefined,
+      paymentId: undefined,
+      expiresAt: undefined,
+      paymentAuthorization: undefined,
+    }
   }
   const userSignedTx = Reflect.get(body, 'userSignedTx')
   return {
@@ -242,6 +250,7 @@ function bodyValue(body: unknown): {
       : undefined,
     paymentId: Reflect.get(body, 'paymentId'),
     expiresAt: Reflect.get(body, 'expiresAt'),
+    paymentAuthorization: Reflect.get(body, 'paymentAuthorization'),
   }
 }
 

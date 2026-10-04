@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto'
 import {
   createPublicClient,
   getAddress,
@@ -94,6 +94,7 @@ export type ServicePolicyCode =
   | 'PILOT_POLICY_NOT_READY'
   | 'ATTEMPT_LEDGER_FULL'
   | 'PAYMENT_EXPIRED'
+  | 'PAYMENT_AUTHORIZATION_INVALID'
 
 export class ServicePolicyError extends Error {
   override readonly name = 'ServicePolicyError'
@@ -108,6 +109,8 @@ export class ServicePolicyError extends Error {
 export class SponsorService {
   private readonly attempts = new Map<string, Promise<SponsorshipResult>>()
 
+  private readonly mainnetPayments = new Map<string, string>()
+
   constructor(
     private readonly config: Pick<
       FeePayerConfig,
@@ -116,14 +119,21 @@ export class SponsorService {
       | 'chainId'
       | 'killSwitchActive'
       | 'minimumReserveWei'
-    > & Partial<Pick<FeePayerConfig, 'networkId' | 'pilotPolicy'>>,
+    > & Partial<Pick<
+      FeePayerConfig,
+      'networkId' | 'pilotPolicy' | 'paymentAuthorizationKey'
+    >>,
     private readonly dependencies: SponsorDependencies,
     private readonly now: () => number = Date.now,
   ) {}
 
   async sponsor(
     raw: unknown,
-    context?: { readonly paymentId: unknown; readonly expiresAt: unknown },
+    context?: {
+      readonly paymentId: unknown
+      readonly expiresAt: unknown
+      readonly paymentAuthorization?: unknown
+    },
   ): Promise<SponsorshipResult> {
     if (this.config.killSwitchActive) {
       throw new ServicePolicyError('KILL_SWITCH_ACTIVE')
@@ -141,13 +151,23 @@ export class SponsorService {
         ? Date.parse(context.expiresAt)
         : Number.NaN
       if (this.config.pilotPolicy?.ready !== true
-        || String(context?.paymentId ?? '') !== this.config.pilotPolicy.pilot_payment_id
+        || this.config.pilotPolicy.authorization_mode !== 'hmac-sha256-v1'
         || !Number.isFinite(expiresAt)
         || expiresAt <= this.now()) {
         throw new ServicePolicyError('PILOT_POLICY_NOT_READY')
       }
+      if (!validPaymentAuthorization(
+        this.config.paymentAuthorizationKey,
+        context?.paymentId,
+        context?.expiresAt,
+        context?.paymentAuthorization,
+        keccak256(sender.raw),
+      )) {
+        throw new ServicePolicyError('PAYMENT_AUTHORIZATION_INVALID')
+      }
     }
     const fingerprint = createHash('sha256').update(sender.raw).digest('hex')
+    const paymentId = String(context?.paymentId ?? '')
     const existing = this.attempts.get(fingerprint)
     if (existing !== undefined) {
       if (this.config.networkId === 'kaia-mainnet') {
@@ -155,8 +175,18 @@ export class SponsorService {
       }
       return existing
     }
-    if (this.config.networkId === 'kaia-mainnet' && this.attempts.size >= 1) {
-      throw new ServicePolicyError('ATTEMPT_LEDGER_FULL')
+    if (this.config.networkId === 'kaia-mainnet') {
+      if (this.mainnetPayments.has(paymentId)) {
+        throw new ServicePolicyError('ATTEMPT_LEDGER_FULL')
+      }
+      const configuredGlobalLimit = Number(
+        this.config.pilotPolicy?.max_attempts_global ?? '0',
+      )
+      if (!Number.isSafeInteger(configuredGlobalLimit)
+        || configuredGlobalLimit < 1
+        || this.attempts.size >= configuredGlobalLimit) {
+        throw new ServicePolicyError('ATTEMPT_LEDGER_FULL')
+      }
     }
     if (this.attempts.size >= 1000) {
       throw new ServicePolicyError('ATTEMPT_LEDGER_FULL')
@@ -164,6 +194,9 @@ export class SponsorService {
 
     const attempt = this.execute(sender, expiresAt)
     this.attempts.set(fingerprint, attempt)
+    if (this.config.networkId === 'kaia-mainnet') {
+      this.mainnetPayments.set(paymentId, fingerprint)
+    }
 
     try {
       const result = await attempt
@@ -171,6 +204,10 @@ export class SponsorService {
     } catch (error) {
       if (broadcastCertaintyForError(error) === 'definitely_not_broadcast') {
         this.attempts.delete(fingerprint)
+        if (this.config.networkId === 'kaia-mainnet'
+          && this.mainnetPayments.get(paymentId) === fingerprint) {
+          this.mainnetPayments.delete(paymentId)
+        }
       }
       throw error
     }
@@ -192,12 +229,13 @@ export class SponsorService {
       if (policy?.ready !== true || policy.max_gas_price_wei === ''
         || policy.maximum_balance_wei === '' || policy.merchant_address === ''
         || policy.sender_address === ''
-        || policy.max_payment_jpyc !== '1'
+        || policy.max_payment_jpyc === ''
         || sender.gasLimit > BigInt(policy.max_gas)
         || sender.gasPrice > BigInt(policy.max_gas_price_wei)
         || sender.recipient.toLowerCase() !== policy.merchant_address
         || sender.sender.toLowerCase() !== policy.sender_address
-        || sender.atomicAmount !== 10n ** 18n
+        || sender.atomicAmount <= 0n
+        || sender.atomicAmount > BigInt(policy.max_payment_jpyc) * 10n ** 18n
         || balance > BigInt(policy.maximum_balance_wei)) {
         throw new ServicePolicyError('PILOT_POLICY_NOT_READY')
       }
@@ -281,6 +319,29 @@ export class SponsorService {
     }
   }
 
+}
+
+function validPaymentAuthorization(
+  key: string | null | undefined,
+  paymentId: unknown,
+  expiresAt: unknown,
+  authorization: unknown,
+  senderTransactionHash: Hash,
+): boolean {
+  if (typeof key !== 'string' || !/^[0-9a-f]{64}$/u.test(key)
+    || (typeof paymentId !== 'number' && typeof paymentId !== 'string')
+    || !/^[1-9]\d*$/u.test(String(paymentId))
+    || typeof expiresAt !== 'string' || expiresAt === ''
+    || typeof authorization !== 'string'
+    || !/^[0-9a-f]{64}$/u.test(authorization)) {
+    return false
+  }
+  const canonical = `livt-mainnet-payment-v1\n${String(paymentId)}\n${expiresAt}\n${senderTransactionHash.toLowerCase()}`
+  const expected = createHmac('sha256', Buffer.from(key, 'hex'))
+    .update(canonical)
+    .digest()
+  const received = Buffer.from(authorization, 'hex')
+  return received.length === expected.length && timingSafeEqual(received, expected)
 }
 
 export function broadcastCertaintyForError(

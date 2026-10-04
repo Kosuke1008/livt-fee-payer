@@ -10,6 +10,7 @@ const ADDRESS = '0x1111111111111111111111111111111111111111'
 const validEnvironment = {
   BLOCKCHAIN_NETWORK: 'kaia-mainnet',
   FEE_PAYER_API_KEY: 'a'.repeat(64),
+  MAINNET_PAYMENT_AUTHORIZATION_KEY: 'c'.repeat(64),
   FEE_PAYER_KAIA_MAINNET_RPC_URL: 'https://mainnet-primary.example.test',
   FEE_PAYER_KAIA_MAINNET_SECONDARY_RPC_URL:
     'https://mainnet-secondary.example.test',

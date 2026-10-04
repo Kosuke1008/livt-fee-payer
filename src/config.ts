@@ -15,6 +15,7 @@ export interface FeePayerConfig {
   readonly host: '127.0.0.1'
   readonly port: number
   readonly apiKey: string
+  readonly paymentAuthorizationKey: string | null
   readonly localPrivateKey: Hex | null
   readonly signerType: 'local-private-key' | 'external'
   readonly mainnetSignerBackend: 'aws-kms' | null
@@ -105,6 +106,9 @@ export function loadConfig(
   if (apiKey.length < 32 || apiKey.length > 512 || /\s/u.test(apiKey)) {
     throw new ConfigurationError('Invalid internal API key configuration')
   }
+  const paymentAuthorizationKey = profile.id === 'kaia-mainnet'
+    ? authorizationKey(environment.MAINNET_PAYMENT_AUTHORIZATION_KEY)
+    : null
   if (
     localPrivateKey !== null &&
     !/^0x[0-9a-fA-F]{64}$/u.test(localPrivateKey)
@@ -144,6 +148,7 @@ export function loadConfig(
     host: '127.0.0.1',
     port: integer(environment.FEE_PAYER_PORT ?? '19000', 1024, 65535),
     apiKey,
+    paymentAuthorizationKey,
     localPrivateKey: localPrivateKey as Hex | null,
     signerType,
     mainnetSignerBackend,
@@ -179,10 +184,23 @@ export function loadConfig(
     mainnetSigningEnabled,
     mainnetBroadcastEnabled,
     pilotPolicy: profile.id === 'kaia-mainnet' && feePayerAddress !== null
-      ? inspectMainnetPilotPolicy(environment, maxGas, minimumReserveWei, feePayerAddress)
+      ? inspectMainnetPilotPolicy(
+          environment,
+          maxGas,
+          minimumReserveWei,
+          feePayerAddress,
+          paymentAuthorizationKey ?? '',
+        )
       : null,
     activationReleaseCapable,
   }
+}
+
+function authorizationKey(value: string | undefined): string {
+  if (value === undefined || !/^[0-9a-fA-F]{64}$/u.test(value)) {
+    throw new ConfigurationError('Invalid Mainnet payment authorization key')
+  }
+  return value.toLowerCase()
 }
 
 function requiredEither(

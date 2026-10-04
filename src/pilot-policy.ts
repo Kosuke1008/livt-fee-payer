@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import type { Address } from 'viem'
 
 export interface MainnetPilotPolicy {
@@ -17,7 +18,8 @@ export interface MainnetPilotPolicy {
   readonly maximum_balance_wei: string
   readonly merchant_address: string
   readonly sender_address: string
-  readonly pilot_payment_id: string
+  readonly authorization_key_id: string
+  readonly authorization_mode: 'hmac-sha256-v1'
 }
 
 // Only validated public policy values leave this parser. Invalid or absent
@@ -27,6 +29,7 @@ export function inspectMainnetPilotPolicy(
   serviceMaxGas: bigint,
   minimumReserveWei: bigint,
   feePayerAddress: Address,
+  paymentAuthorizationKey: string,
 ): MainnetPilotPolicy {
   const diagnostics: string[] = []
   const integer = (name: string, maximum = 18_446_744_073_709_551_615n): string => {
@@ -36,13 +39,6 @@ export function inspectMainnetPilotPolicy(
       return ''
     }
     return value
-  }
-  const one = (name: string): string => {
-    if (environment[name] !== '1') {
-      diagnostics.push(`INVALID_${name}`)
-      return ''
-    }
-    return '1'
   }
   const kaia = (name: string): string => {
     const value = environment[name]
@@ -67,27 +63,46 @@ export function inspectMainnetPilotPolicy(
     return value.toLowerCase()
   }
   const fields = {
-    max_payment_jpyc: one('SELF_HOSTED_MAINNET_MAX_PAYMENT_JPYC'),
+    max_payment_jpyc: integer('SELF_HOSTED_MAINNET_MAX_PAYMENT_JPYC', 100_000n),
     max_gas: integer('SELF_HOSTED_MAINNET_MAX_GAS'),
     max_gas_price_wei: integer('SELF_HOSTED_MAINNET_MAX_GAS_PRICE_WEI'),
     rate_window_seconds: integer('SELF_HOSTED_MAINNET_RATE_WINDOW_SECONDS', 86400n),
-    max_attempts_per_user: one('SELF_HOSTED_MAINNET_MAX_ATTEMPTS_PER_USER'),
-    max_attempts_per_store: one('SELF_HOSTED_MAINNET_MAX_ATTEMPTS_PER_STORE'),
-    max_attempts_per_sender: one('SELF_HOSTED_MAINNET_MAX_ATTEMPTS_PER_SENDER'),
-    max_attempts_global: one('SELF_HOSTED_MAINNET_MAX_ATTEMPTS_GLOBAL'),
-    daily_transaction_limit: one('SELF_HOSTED_MAINNET_DAILY_TRANSACTION_LIMIT'),
+    max_attempts_per_user: integer('SELF_HOSTED_MAINNET_MAX_ATTEMPTS_PER_USER', 1_000n),
+    max_attempts_per_store: integer('SELF_HOSTED_MAINNET_MAX_ATTEMPTS_PER_STORE', 1_000n),
+    max_attempts_per_sender: integer('SELF_HOSTED_MAINNET_MAX_ATTEMPTS_PER_SENDER', 1_000n),
+    max_attempts_global: integer('SELF_HOSTED_MAINNET_MAX_ATTEMPTS_GLOBAL', 1_000n),
+    daily_transaction_limit: integer('SELF_HOSTED_MAINNET_DAILY_TRANSACTION_LIMIT', 1_000n),
     daily_kaia_budget_wei: kaia('SELF_HOSTED_MAINNET_DAILY_KAIA_BUDGET'),
     minimum_reserve_wei: minimumReserveWei > 0n ? minimumReserveWei.toString() : '',
     maximum_balance_wei: kaia('MAINNET_PILOT_MAX_FEE_PAYER_BALANCE_KAIA'),
     merchant_address: address('MAINNET_STAGING_MERCHANT_ADDRESS'),
     sender_address: address('MAINNET_STAGING_APPROVED_SENDER_ADDRESSES'),
-    pilot_payment_id: integer('MAINNET_PILOT_PAYMENT_ID'),
+    authorization_key_id: /^[0-9a-f]{64}$/u.test(paymentAuthorizationKey)
+      ? `sha256:${createHash('sha256')
+        .update(Buffer.from(paymentAuthorizationKey, 'hex'))
+        .digest('hex').slice(0, 16)}`
+      : '',
+    authorization_mode: 'hmac-sha256-v1' as const,
+  }
+  if (fields.authorization_key_id === '') {
+    diagnostics.push('INVALID_MAINNET_PAYMENT_AUTHORIZATION_KEY')
   }
   if (fields.max_gas !== '' && BigInt(fields.max_gas) > 1_000_000n) {
     diagnostics.push('MAX_GAS_ABOVE_PILOT_CEILING')
   }
   if (fields.rate_window_seconds !== '' && BigInt(fields.rate_window_seconds) < 3600n) {
     diagnostics.push('RATE_WINDOW_BELOW_PILOT_MINIMUM')
+  }
+  if ([fields.max_attempts_per_user, fields.max_attempts_per_store,
+    fields.max_attempts_per_sender, fields.max_attempts_global,
+    fields.daily_transaction_limit].every((value) => value !== '')) {
+    const global = BigInt(fields.max_attempts_global)
+    if (BigInt(fields.max_attempts_per_user) > global
+      || BigInt(fields.max_attempts_per_store) > global
+      || BigInt(fields.max_attempts_per_sender) > global
+      || global > BigInt(fields.daily_transaction_limit)) {
+      diagnostics.push('ATTEMPT_LIMIT_RELATIONSHIP_INVALID')
+    }
   }
   if (minimumReserveWei <= 0n) diagnostics.push('INVALID_FEE_PAYER_MIN_RESERVE_KAIA')
   if (fields.max_gas !== '' && BigInt(fields.max_gas) !== serviceMaxGas) {
@@ -98,12 +113,9 @@ export function inspectMainnetPilotPolicy(
     if (fields.daily_kaia_budget_wei !== '' && maximumFee > BigInt(fields.daily_kaia_budget_wei)) {
       diagnostics.push('DAILY_BUDGET_BELOW_MAXIMUM_FEE')
     }
-    if (fields.maximum_balance_wei !== '' && maximumFee + minimumReserveWei > BigInt(fields.maximum_balance_wei)) {
-      diagnostics.push('MAXIMUM_BALANCE_BELOW_FEE_PLUS_RESERVE')
-    }
     if (fields.daily_kaia_budget_wei !== '' && fields.maximum_balance_wei !== '' &&
-      BigInt(fields.daily_kaia_budget_wei) > BigInt(fields.maximum_balance_wei)) {
-      diagnostics.push('DAILY_BUDGET_ABOVE_MAXIMUM_BALANCE')
+      BigInt(fields.daily_kaia_budget_wei) + minimumReserveWei > BigInt(fields.maximum_balance_wei)) {
+      diagnostics.push('MAXIMUM_BALANCE_BELOW_DAILY_BUDGET_PLUS_RESERVE')
     }
   }
   if (fields.merchant_address !== '' && fields.sender_address !== '' && (
